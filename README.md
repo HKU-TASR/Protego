@@ -18,15 +18,13 @@ The original video and its protected versions using three different methods are 
 | OPOM [TPAMI'22]     | ![](assets/demo-bc-opom.gif)                         |
 
 For more technical details and experimental results, we invite you to check out our paper [[here]](https://arxiv.org/abs/2508.02034):  
-**Ziling Wang, Shuya Yang, Jialin Lu, and Ka-Ho Chow,** *"Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure,"*  arXiv preprint arXiv:2508.02034, Aug 4, 2025.
+**Ziling Wang, Shuya Yang, Jialin Lu, and Ka-Ho Chow,** *"Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure,"*  IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Denver, CO, USA, Jun. 3-7, 2026.
 ```
-@article{wang2025protego,
+@inproceedings{wang2026protego,
     title={Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure},
     author={Ziling Wang and Shuya Yang and Jialin Lu and Ka-Ho Chow},
-    year={2025},
-    eprint={2508.02034},
-    archivePrefix={arXiv},
-    primaryClass={cs.CV}
+    booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+    year={2026}
 }
 ```
 ---
