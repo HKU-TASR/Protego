@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 import datetime
 
 import torch
@@ -13,11 +13,11 @@ import tqdm
 from .FacialRecognition import FR
 from .FaceDetection import FD
 from .UVMapping import UVGenerator
-from .utils import load_imgs, load_mask, build_facedb, build_compressed_face_db, crop_face, complete_del, visualize_mask, eval_masks, compression_eval, eval_mask_end2end
+from .utils import load_imgs, load_mask, build_facedb, build_compressed_face_db, crop_face, complete_del, visualize_mask, eval_masks, compression_eval, eval_mask_end2end, get_augmented_ims
 from .compression import compress
 from . import BASE_PATH
 
-def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train: callable = None) -> None:
+def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train: Optional[Any] = None) -> None:
     """
     Run training or evaluation based on the provided configuration.
 
@@ -140,6 +140,7 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                 complete_del()
             train_start = datetime.datetime.now()
             univ_mask: torch.Tensor = train(cfgs=cfgs, frs=train_frs, train_dl=train_dl, results_save_path=res_save_path)
+            print(univ_mask.shape, univ_mask.min(), univ_mask.max())
             training_time = (datetime.datetime.now() - train_start).total_seconds()
             print(f"Training time for protectee {protectee}: {training_time:.2f} seconds.")
             training_times.append(training_time)
@@ -190,6 +191,8 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
             eval_imgs.div_(255.)
             img_num = eval_imgs.shape[0]
             # Ensure UV mapping runs on the target device, then move tensors back to CPU for DataLoader workers
+            if cfgs.input_robustness_eval:
+                eval_imgs = get_augmented_ims(orig_imgs=eval_imgs, methods = cfgs.input_robustness_methods, aug_cfgs=cfgs.input_robustness_cfgs)
             eval_uvs, eval_bin_masks, _ = uvmapper.forward(eval_imgs)
             eval_imgs = eval_imgs.cpu()
             eval_uvs = eval_uvs.cpu()
@@ -222,6 +225,11 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
             )
             del eval_imgs, eval_uvs, eval_bin_masks
             complete_del()
+            if cfgs.replication_attack:
+                mask_path = os.path.join(BASE_PATH, 'experiments', cfgs.replication_mask_name[0], protectee, cfgs.replication_mask_name[1])
+                rep_mask = load_mask(mask_path=mask_path, device=device)
+            else:
+                rep_mask = None
             for eval_fr in eval_frs:
                 noise_db = build_facedb(db_path=noise_db_path, fr=eval_fr, device=device)
                 res = eval_masks(
@@ -236,7 +244,10 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                     query_portion=cfgs.query_portion,
                     vis_eval=cfgs.vis_eval,
                     lpips_backbone=cfgs.lpips_backbone, 
-                    verbose=True)
+                    verbose=True, 
+                    replication_attack=cfgs.replication_attack,
+                    uvmapper=uvmapper,
+                    replication_mask=rep_mask)
                 if mode == 'train':
                     res['training_time'] = training_time
                 with open(os.path.join(res_save_path, f"eval_res_{eval_fr.model_name}.yaml"), 'w') as f:
@@ -284,7 +295,10 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                                 smoothing=None if cfgs.smoothing.lower() == 'none' else cfgs.smoothing.lower(),
                                 vis_eval=False, 
                                 lpips_backbone=cfgs.lpips_backbone,
-                                verbose=True)
+                                verbose=True, 
+                                eval_scene1_db=None, 
+                                replication_attack=cfgs.replication_attack,
+                                replication_mask=rep_mask)
                 for fr_name, prot_res in end2end_res['prot_results'].items():
                     with open(os.path.join(res_save_path, f"end2end_eval_res_{fr_name}.yaml"), 'w') as f:
                         yaml.dump(prot_res, f)
@@ -340,6 +354,11 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                     pin_memory=False,
                     persistent_workers=False
                 )
+                if cfgs.replication_attack:
+                    mask_path = os.path.join(BASE_PATH, 'experiments', cfgs.replication_mask_name[0], protectee, cfgs.replication_mask_name[1])
+                    rep_mask = load_mask(mask_path=mask_path, device=device)
+                else:
+                    rep_mask = None
                 for eval_fr in eval_frs:
                     noise_db = build_facedb(db_path=noise_db_path, fr=eval_fr, device=device)
                     for other_protectee, other_protectee_features in protectee_eval_features.items():
@@ -358,7 +377,10 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                         query_portion=cfgs.query_portion,
                         vis_eval=cfgs.vis_eval,
                         lpips_backbone=cfgs.lpips_backbone, 
-                        verbose=True)
+                        verbose=True, 
+                        replication_attack=cfgs.replication_attack,
+                        uvmapper=uvmapper,
+                        replication_mask=rep_mask)
                     if mode == 'train':
                         res['training_time'] = training_times[protectee_idx]
                     with open(os.path.join(res_save_path, f"eval_res_{eval_fr.model_name}.yaml"), 'w') as f:
@@ -419,7 +441,9 @@ def run(cfgs: OmegaConf, mode: str, data: Dict[str, Dict[str, List[str]]], train
                                 vis_eval=False, 
                                 lpips_backbone=cfgs.lpips_backbone,
                                 verbose=True, 
-                                eval_scene1_db=eval_scene1_db)
+                                eval_scene1_db=eval_scene1_db, 
+                                replication_attack=cfgs.replication_attack,
+                                replication_mask=rep_mask)
                     for fr_name, prot_res in end2end_res['prot_results'].items():
                         with open(os.path.join(res_save_path, f"end2end_eval_res_{fr_name}.yaml"), 'w') as f:
                             yaml.dump(prot_res, f)

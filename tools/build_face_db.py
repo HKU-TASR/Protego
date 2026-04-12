@@ -14,8 +14,9 @@ if __name__ == "__main__":
     ######################### Configuration #########################
     device = torch.device('cuda:0')
     mode = 'original' # 'original', 'compressed', 'both'
-    face_db_base_paths = [f"{BASE_PATH}/face_db/face_scrub", f"{BASE_PATH}/face_db/face_scrub/_noise_db"]
-    fr_names =  ['ir50_adaface_fsclean', 'ir50_adaface_fsprot20cham', 'ir50_adaface_fsprot20protego']
+    face_db_base_paths = [f"{BASE_PATH}/face_db/bfw_gender_woman_cropped", 
+                          f"{BASE_PATH}/face_db/bfw_gender_man_cropped"]
+    fr_names = ['ir50_adaface_casia']
     compression_methods = ['none', 'gaussian', 'median', 'jpeg', 'resize', 'quantize', 'vid_codec']
     compression_cfgs = {
         'none': {}, 

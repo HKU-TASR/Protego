@@ -527,7 +527,10 @@ def eval_masks(three_d: bool,
             query_portion: float = 0.5, 
             vis_eval: bool = True, 
             lpips_backbone: str = "vgg", 
-            verbose: bool = False) -> Dict[str, float]:
+            verbose: bool = False, 
+            replication_attack: bool = False, 
+            uvmapper: Optional[UVGenerator] = None, 
+            replication_mask: Optional[torch.Tensor] = None) -> Dict[str, float]:
     """
     Evaluate masks against a database of facial features.
 
@@ -544,6 +547,9 @@ def eval_masks(three_d: bool,
         vis_eval (bool): Whether to visualize the evaluation results.
         lpips_backbone (str): The backbone to use for LPIPS calculation. 'vgg', 'alex', or 'squeeze'.
         verbose (bool): Whether to print the evaluation results.
+        replication_attack (bool): Whether to perform replication attack evaluation.
+        uvmapper (Optional[UVGenerator]): The UV mapper to use for 3D masks
+        rep_mask (Optional[torch.Tensor]): The replication attack mask. Shape: (B, 3, H, W). Range: [-epsilon, epsilon]. dtype: np.float32.
 
     Returns:
         Dict[str, float]: A dictionary containing the evaluation results. Includes retrieval accuracies, various norms, and visual quality metrics.
@@ -562,11 +568,17 @@ def eval_masks(three_d: bool,
             textures = tensor_masks[img_cnt:img_cnt + img_num].to(device)  # Shape: [B, 224, 224, 3]
             perturbations = torch.clamp(F.grid_sample(textures, uvs, mode='bilinear', align_corners=True), -epsilon, epsilon)
         else:
-            perturbations = torch.clamp(tensor_masks[img_cnt:img_cnt + img_num].to(device), -epsilon, epsilon)
+            perturbations = tensor_masks[img_cnt:img_cnt + img_num].to(device)
         if bin_mask:
             bin_masks = tensors[2].to(device)
             perturbations *= bin_masks
         protected_faces = torch.clamp(orig_faces + perturbations, 0, 1)
+        if replication_attack:
+            uvs, bin_masks, _ = uvmapper.forward(protected_faces)
+            rep_perts = torch.clamp(F.grid_sample(replication_mask.repeat(protected_faces.shape[0], 1, 1, 1), uvs, mode='bilinear', align_corners=True), -epsilon, epsilon) if three_d else replication_mask.repeat(protected_faces.shape[0], 1, 1, 1)
+            if bin_mask:
+                rep_perts = rep_perts * bin_masks
+            protected_faces = torch.clamp(protected_faces - rep_perts, 0, 1)
         img_cnt += img_num
         orig_features.append(fr(orig_faces).cpu())
         protected_features.append(fr(protected_faces).cpu())
@@ -683,13 +695,15 @@ def eval_mask_end2end(three_d: bool,
                     vis_eval: bool = True, 
                     lpips_backbone: str = "vgg", 
                     verbose: bool = False, 
-                    eval_scene1_db: Optional[Dict[str, Dict[str, torch.Tensor]]] = None) -> Dict[str, Union[float, Dict[str, float]]]:
+                    eval_scene1_db: Optional[Dict[str, Dict[str, torch.Tensor]]] = None, 
+                    replication_attack: bool = False, 
+                    replication_mask: Optional[torch.Tensor] = None) -> Dict[str, Union[float, Dict[str, float]]]:
     """
     Evaluate masks against a database of facial features in an end-to-end manner, aka starting from uncropped images to protection evaluation.
 
     Args:
         three_d (bool): Whether to use 3D masks.
-        test_raw_imgs (List[torch.Tensor]): The list of original uncropped images. Each tensor has shape (3, H, W), range [0, 1], dtype: torch.float32.
+        test_raw_imgs (List[torch.Tensor]): The list of original uncropped images. Each tensor has shape (1, 3, H, W), range [0, 1], dtype: torch.float32.
         face_db_path (str): The path to the database of facial features.
         frs (List[FR]): The list of facial recognition models.
         fd (FD): The face detection model.
@@ -706,6 +720,8 @@ def eval_mask_end2end(three_d: bool,
         lpips_backbone (str): The backbone to use for LPIPS calculation. 'vgg', 'alex', or 'squeeze'.
         verbose (bool): Whether to print the evaluation results.
         eval_scene1_db (Optional[Dict[str, Dict[str, torch.Tensor]]]): The pre-built database for scene 1 evaluation. If None, it will be built solely from face_db_path.
+        replication_attack (bool): Whether to perform a replication attack evaluation.
+        replication_masks (Optional[torch.Tensor]): The masks to use for replication attack evaluation. Shape: (N, 3, H, W). Range: [-epsilon, epsilon]. dtype: torch.float32.
 
     Returns:
         Dict[str, Union[float, Dict[str, float]]]: A dictionary containing the evaluation results. Includes retrieval accuracies for each FR model, various norms, and visual quality metrics.
@@ -775,6 +791,13 @@ def eval_mask_end2end(three_d: bool,
         protected_faces.append(F.interpolate(protected_face.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False).squeeze(0))
         have_face.append(img_idx)
     protected_faces = torch.stack(protected_faces, dim=0)
+    # Replication Attack
+    if replication_attack and replication_mask is not None:
+        uvs, bin_masks, _ = uvmapper.forward(imgs=protected_faces)
+        rep_perts = torch.clamp(F.grid_sample(replication_mask.repeat(protected_faces.shape[0], 1, 1, 1), uvs, mode='bilinear', align_corners=True), -epsilon, epsilon) if three_d else replication_mask.repeat(protected_faces.shape[0], 1, 1, 1)
+        if bin_mask:
+            rep_perts = rep_perts * bin_masks
+        protected_faces = torch.clamp(protected_faces - rep_perts, 0, 1)
     original_faces = resized_faces[have_face]
     l0s, l1s, l2s, linfs, psnrs, ssims, lpipses = [0], [0], [0], [0], [0], [0], [0]
     if vis_eval:
@@ -955,7 +978,7 @@ def visualize_mask(
     if three_d:
         _pert = torch.clamp(F.grid_sample(_univ_mask, _uv.unsqueeze(0), mode='bilinear', align_corners=True).squeeze(0), -epsilon, epsilon)
     else:
-        _pert = torch.clamp(_univ_mask.squeeze(0), -epsilon, epsilon)
+        _pert = _univ_mask.squeeze(0)
     if use_bin_mask:
         _pert = _pert * _bin_mask
     _prot_img = torch.clamp(_orig_img + _pert, 0, 1)
@@ -988,3 +1011,9 @@ def visualize_mask(
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
+def get_augmented_ims(orig_imgs: torch.Tensor, methods: List[str], aug_cfgs: Dict[str, Any]) -> torch.Tensor:
+    augmented_imgs = orig_imgs.clone()
+    for method in methods:
+        augmented_imgs = compress(imgs=augmented_imgs, method=method, differentiable=False, **aug_cfgs[method])
+    return augmented_imgs

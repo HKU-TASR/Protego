@@ -1,7 +1,8 @@
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Union
 import io
 import datetime
 from fractions import Fraction
+import random
 
 import torch
 import torch.nn.functional as F
@@ -245,7 +246,70 @@ def vid_compress(imgs: torch.Tensor, codec: str, crf: int = 32, preset: str = 'f
             _frame = cv2.hconcat([_orig, _frame])
             cv2.imwrite(f"/home/zlwang/ProtegoPlus/trash/vid_codec/vid_compressed_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png", _frame)"""
         return torch.stack(frames_out, dim=0).to(imgs.device)
-    
+
+def occlude(imgs: torch.Tensor, occ_size: Union[float, Tuple[int, int]], size_mode: str = 'same_dim', occ_val: float = 0., occ_mode: str = 'center_bottom', differentiable: bool = False, sharpness: float = 20.0) -> torch.Tensor:
+    """
+    Occlude a region in the image
+
+    Args:
+        imgs (Tensor): Input image tensor of shape [B, C, H, W], Range: [0, 1]
+        occ_size (Union[float, Tuple[int, int]]): Size of the occlusion (height, width) or a ratio
+        size_mode (str): Mode for interpreting occ_size ('same_dim' or 'ratio')
+            - 'same_dim': occ area same height and width as specified in occ_size. occ_size must be a tuple of (height, width)
+            - 'same_size': occ area has the same size as specified in occ_size, but may have different height and width. occ_size must be a tuple of (height, width)
+            - 'ratio': occ_size is a ratio of the image dimensions. occ_size must be a float in (0, 1)
+        occ_val (float): Value to fill in the occluded region
+        occ_mode (str): Mode for occlusion position ('center', 'center_bottom', 'random')
+            - 'center': Occlude center of the image
+            - 'center_bottom': Occlude center bottom of the image
+            - 'random': Occlude a random position in the image
+        differentiable (bool): Whether the occlusion should be differentiable (soft edges) or not (hard edges)
+        sharpness (float): Sharpness of the occlusion edges if differentiable is True
+    """
+    B, C, H, W = imgs.shape
+    occluded_imgs = imgs.clone()
+    for i in range(B):
+        if size_mode == 'same_dim':
+            occ_h, occ_w = occ_size
+        elif size_mode == 'same_size':
+            size = occ_size[0] * occ_size[1]
+            occ_h = random.choice(range(1, min(H, size)))
+            occ_w = min(W, size // occ_h)
+        elif size_mode == 'ratio':
+            size = occ_size * H * W
+            occ_h = random.choice(range(1, min(H, int(size))))
+            occ_w = min(W, int(size) // occ_h)
+        else:
+            raise ValueError(f"Unsupported size_mode: {size_mode}")
+        if occ_mode == 'center':
+            cx = W // 2
+            cy = H // 2
+        elif occ_mode == 'center_bottom':
+            cx = W // 2
+            cy = H - occ_h // 2
+        elif occ_mode == 'random':
+            cx = random.randint(occ_w // 2, W - occ_w // 2)
+            cy = random.randint(occ_h // 2, H - occ_h // 2)
+        else:
+            raise ValueError(f"Unsupported occ_mode: {occ_mode}")
+        x1 = max(0, cx - occ_w // 2)
+        x2 = min(W, cx + occ_w // 2)
+        y1 = max(0, cy - occ_h // 2)
+        y2 = min(H, cy + occ_h // 2)
+        if not differentiable:
+            occluded_imgs[i, :, y1:y2, x1:x2] = occ_val
+        else:
+            device = imgs.device
+            y_coords = torch.arange(H, device=device, dtype=torch.float32)
+            x_coords = torch.arange(W, device=device, dtype=torch.float32)
+            yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+            mask_y = torch.sigmoid(sharpness * (yy - y1)) * torch.sigmoid(sharpness * (y2 - yy))
+            mask_x = torch.sigmoid(sharpness * (xx - x1)) * torch.sigmoid(sharpness * (x2 - xx))
+            soft_mask = mask_y * mask_x
+            soft_mask = soft_mask.unsqueeze(0)
+            occluded_imgs[i] = imgs[i] * (1 - soft_mask) + occ_val * soft_mask
+    return occluded_imgs
+
 def compress(imgs: torch.Tensor, method: str, **kwargs: Dict[str, Any]) -> torch.Tensor:
     """
     Compress images using specified method
@@ -274,6 +338,8 @@ def compress(imgs: torch.Tensor, method: str, **kwargs: Dict[str, Any]) -> torch
         return quantize(imgs, **kwargs)
     elif 'vid_codec' in method:
         return vid_compress(imgs, **kwargs)
+    elif 'occlude' in method:
+        return occlude(imgs, **kwargs)
     elif 'none' in method:
         return imgs
     else:

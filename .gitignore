@@ -17,3 +17,4 @@ smirk/assets/
 face_db/
 experiments/
 results/
+assets/advcloak/*.pth
