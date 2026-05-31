@@ -9,12 +9,17 @@ trash/
 
 FR_DB/*/pretrained/
 FD_DB/*/pretrained/
-FP_DB/*/pretrained/
-FAttri_DB/*/pretrained/
+FAttri_DB/
+FP_DB/
 smirk/pretrained_models/
 smirk/assets/
 
 face_db/
 experiments/
 results/
-assets/advcloak/*.pth
+assets/advcloak/
+
+# Private paper / planning artifacts (never publish)
+MainPaper.pdf
+MainPaper.txt
+CodePublicationPlan.md

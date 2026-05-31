@@ -5,14 +5,15 @@ import torch
 import cv2
 import numpy as np
 
+from protego import BASE_PATH
 from protego.utils import crop_face, load_imgs
 from protego.FaceDetection import FD
 
 if __name__ == "__main__":
     with torch.no_grad():
-        device = torch.device('cuda:3')
-        src_folder = "/home/zlwang/ProtegoPlus/face_db/bfw_gender_woman"
-        dst_folder = "/home/zlwang/ProtegoPlus/face_db/bfw_gender_woman_cropped"
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        src_folder = os.path.join(BASE_PATH, "face_db", "my_dataset")
+        dst_folder = os.path.join(BASE_PATH, "face_db", "my_dataset_cropped")
         os.makedirs(dst_folder, exist_ok=True)
         detector = FD(model_name="mobilenet_retinaface_widerface", device=device)
 

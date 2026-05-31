@@ -22,7 +22,7 @@ if __name__ == "__main__":
         ####################################################################################################################
         # Configuration
         ####################################################################################################################
-        device = torch.device('cuda:7')
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         protectee_name = "Bradley_Cooper"
         vid_name = "bc1_480p.mp4"
         mask_names = ['default', 'univ_mask.npy']

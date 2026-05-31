@@ -15,4 +15,5 @@ chumpy==0.70
 gdown
 fvcore
 iopath
+lpips
 pytorch_lightning==2.2.1

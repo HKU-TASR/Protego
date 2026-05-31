@@ -37,7 +37,6 @@ def train_protego_mask(cfgs: OmegaConf,
     mask_size = cfgs.mask_size
     device = frs[0].device
     mask_random_seed = cfgs.mask_random_seed
-    #compression = cfgs.compression
 
     # Init the mask
     mask_rand_generator = torch.Generator(device=device)

@@ -23,7 +23,7 @@ if __name__ == "__main__":
         ####################################################################################################################
         # Configuration
         ####################################################################################################################
-        device = torch.device('cuda:7')
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         protectee_name = "Bradley_Cooper"
         src_img_folder = f"{BASE_PATH}/face_db/face_scrub/{protectee_name}"
         dst_img_folder = f"{BASE_PATH}/results/imgs/{protectee_name}_protected"

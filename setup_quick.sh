@@ -1,4 +1,10 @@
 #!/bin/bash
+# Quick environment + asset setup for Protego.
+# Creates a conda env named "protego", installs all dependencies (including SMIRK
+# and PyTorch3D), downloads the third-party detector weights, and then fetches the
+# large datasets/checkpoints via tools/download_assets.py.
+set -e
+
 OS_TYPE=$(uname)
 if [[ "$OS_TYPE" == "Darwin" ]]; then
     echo "Running on macOS"
@@ -29,13 +35,13 @@ if [[ "$OS_TYPE" == "Linux" ]]; then
     check_cuda_support
     CUDA_SUPPORT=$?
     if [[ $CUDA_SUPPORT -ne 0 ]]; then
-        echo "CUDA is not supported on this machine. Exiting." 
+        echo "CUDA is not supported on this machine. Exiting."
         exit 1
     fi
 fi
 
-echo "Downloading SMIRK assets..."
-mkdir tmp && cd tmp
+echo "Downloading SMIRK assets (includes the MediaPipe face_landmarker.task)..."
+rm -rf tmp && mkdir tmp && cd tmp
 git clone https://github.com/georgeretsi/smirk
 mv smirk/assets ../smirk/
 cd ..
@@ -45,8 +51,8 @@ CONDA_BASE=$(conda info --base)
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate base
 
-ENV_NAME="protego_plus"
-PYTHON_VERSION="3.9" 
+ENV_NAME="protego"
+PYTHON_VERSION="3.9"
 if conda env list | grep -q "^$ENV_NAME\s"; then
     echo "Error: Conda environment '$ENV_NAME' already exists. Please remove it or choose a different name."
     exit 1
@@ -75,7 +81,7 @@ if [[ "$OS_TYPE" == "Linux" ]]; then
 elif [[ "$OS_TYPE" == "Darwin" ]]; then
     git clone https://github.com/facebookresearch/pytorch3d.git
     cd pytorch3d
-    MACOSX_DEPLOYMENT_TARGET=$MACOS_VER CC=clang CXX=clang++ pip install . 
+    MACOSX_DEPLOYMENT_TARGET=$MACOS_VER CC=clang CXX=clang++ pip install .
     cd ..
     rm -rf pytorch3d
 fi
@@ -86,59 +92,21 @@ conda install requests=2.32.3 -y
 conda install termcolor=3.1.0 -y
 conda install ipython=8.18.1 -y
 conda install ipykernel -y
-pip install einops 
-pip install thop
+pip install einops
 pip install lpips
-pip install kornia
-pip install av
 conda install -c conda-forge ffmpeg -y
-pip install cvxpy
 cd ..
 echo "All packages installed successfully!"
 
-echo "Downloading MTCNN weights..."
+echo "Downloading MTCNN detector weights..."
 cd FD_DB/MTCNN/pretrained/
 gdown --fuzzy "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link"
 unzip mtcnn_pytorch_weights.zip
 rm -f mtcnn_pytorch_weights.zip
 cd ../../..
 
-#echo "Downloading IR50-AdaFace-CASIA weights..."
-#cd FR_DB/adaface/pretrained
-#gdown --fuzzy "https://drive.google.com/file/d/1g1qdg7_HSzkue7_VrW64fnWuHl0YL2C2/view?usp=sharing"
-#cd ../../..
-
-#echo "Downloading Processed FaceScrub Dataset..."
-cd face_db
-#gdown --fuzzy "https://drive.google.com/file/d/1_Mfq10d1fdDJGDum4QKZphHNXEc8LT0J/view?usp=sharing" # TODO Updated link, with imgs_list.txt
-#unzip face_scrub_preprocessed.zip
-#rm -f face_scrub_preprocessed.zip
-
-echo "Downloading Demo Video and Images..."
-gdown --fuzzy "https://drive.google.com/file/d/1CuSjqc_GGvBatbjkdv2AT4yxUsGcxXUB/view?usp=share_link"
-unzip demo_vids_bradley_cooper.zip
-rm -f demo_vids_bradley_cooper.zip
-gdown --fuzzy "https://drive.google.com/file/d/1SmnKTaPw82hjWcgf-td921licl-BBowD/view?usp=sharing"
-unzip demo_imgs_bradley_cooper.zip
-rm -f demo_imgs_bradley_cooper.zip
-cd ..
-
-echo "Downloading Pretrained Pose-invariant PPTs..."
-cd experiments
-gdown --fuzzy "https://drive.google.com/file/d/1SymmnmEebg_DfUSSrn446Le38eeycetl/view?usp=share_link"
-unzip default.zip
-rm -f default.zip
-cd ..
-
-# ! Temporary for Focal Diversity Analysis
-#echo "Downloading Evaluation Results for Focal Diversity Analysis..."
-#cd results && mkdir eval && cd eval
-#gdown --fuzzy "https://drive.google.com/file/d/1hTd8DGrDdEAZvZNMMxfAiTK2Sn5IipwX/view?usp=sharing" # len3ensemble.zip
-#unzip len3ensemble.zip
-#rm -f len3ensemble.zip
-#gdown --fuzzy "https://drive.google.com/file/d/1m1r7mlxOHSiGbIkg7VFWrystUCjfLSqH/view?usp=sharing" # len4ensemble.zip
-#unzip len4ensemble.zip
-#rm -f len4ensemble.zip
-#cd ../..
+echo "Downloading datasets and checkpoints (FaceScrub eval subset, demo PPT, sample media, ...)..."
+echo "Assets without a configured Google Drive link will be skipped (see tools/download_assets.py)."
+python -m tools.download_assets || true
 
 echo "ALL DONE!!!"
