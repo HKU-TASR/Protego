@@ -12,8 +12,10 @@ torch==2.0.1
 torchvision==0.15.2
 tqdm==4.66.2
 chumpy==0.70
+pytorch_lightning==2.2.1
+pytorch_msssim==1.0.0
 gdown
 fvcore
 iopath
 lpips
-pytorch_lightning==2.2.1
+einops

@@ -20,7 +20,7 @@ MTCNN_HOME = os.path.join(FD_DB_PATH, 'MTCNN')
 LANDMARK_POOL = ['mobilenet_retinaface_widerface', 'resnet50_retinaface_widerface', 'mtcnn']
 DETECTION_ONLY_POOL = []
 
-def download(path: str, url: str) -> None:
+def download(paths: List[str], urls: List[str]) -> None:
     """
     A crude download util function, only tailoreed for the scenarios this project meets. 
 
@@ -28,20 +28,21 @@ def download(path: str, url: str) -> None:
         path (str): The local desired path of the weight file
         url (str): The URL of the file to download.
     """
-    folder = "/".join(path.split("/")[:-1])+'/'
-    if not os.path.exists(path):
-        print(f"Weight {path} does not exist. Downloading it from {url}")
-        if "uc?id" in url:
-            file_id = url.split("uc?id=")[-1]
-            downloaded_f = gdown.download(id=file_id, output=folder, quiet=False)
-        elif "view?usp=sharing" in url:
-            downloaded_f = gdown.download(url=url, output=folder, fuzzy=True, quiet=False)
-        if downloaded_f.endswith(".zip"):
-            with zipfile.ZipFile(downloaded_f, 'r') as zip_ref:
-                zip_ref.extractall(folder)
-            os.remove(downloaded_f)
-        elif downloaded_f != path:
-            os.rename(downloaded_f, path)
+    for path, url in zip(paths, urls):
+        folder = "/".join(path.split("/")[:-1])+'/'
+        if not os.path.exists(path):
+            print(f"Weight {path} does not exist. Downloading it from {url}")
+            if "uc?id" in url:
+                file_id = url.split("uc?id=")[-1]
+                downloaded_f = gdown.download(id=file_id, output=folder, quiet=False)
+            elif "view?usp=sharing" in url:
+                downloaded_f = gdown.download(url=url, output=folder, fuzzy=True, quiet=False)
+            if downloaded_f.endswith(".zip"):
+                with zipfile.ZipFile(downloaded_f, 'r') as zip_ref:
+                    zip_ref.extractall(folder)
+                os.remove(downloaded_f)
+            elif downloaded_f != path:
+                os.rename(downloaded_f, path)
     return
 
 @torch.no_grad()
@@ -113,14 +114,14 @@ class MTCNN_Wrapper(object):
         self.device = device
         self.ldmk_num = 5
         self.path_dict = {
-            'pnet': os.path.join(MTCNN_HOME, 'pretrained/pnet.npy'),
-            'rnet': os.path.join(MTCNN_HOME, 'pretrained/rnet.npy'),
-            'onet': os.path.join(MTCNN_HOME, 'pretrained/onet.npy')
+            'mtcnn': [os.path.join(MTCNN_HOME, 'pretrained/pnet.npy'),
+                      os.path.join(MTCNN_HOME, 'pretrained/rnet.npy'),
+                      os.path.join(MTCNN_HOME, 'pretrained/onet.npy')]
         }
         self.url_dict = {
-            'pnet': "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link",
-            'rnet': "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link",
-            'onet': "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link"
+            'mtcnn': ["https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link",
+                      "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link",
+                      "https://drive.google.com/file/d/1uJopXpkHHzzImZ-4LVWrRHHMbUECi5Fb/view?usp=share_link"]
         }
         for key in self.path_dict:
             download(self.path_dict[key], self.url_dict[key])
@@ -161,12 +162,14 @@ class Retinaface(object):
         self.device = device
         self.ldmk_num = 5  # Number of landmark points (5 points: left eye, right eye, nose, left mouth corner, right mouth corner)
         self.path_dict = {
-            'mobilenet0.25': os.path.join(RETINAFACE_HOME, 'pretrained/mobilenet0.25_Final.pth'),
-            'resnet50': os.path.join(RETINAFACE_HOME, 'pretrained/Resnet50_Final.pth')
+            'mobilenet0.25': [os.path.join(RETINAFACE_HOME, 'pretrained/mobilenet0.25_Final.pth'), 
+                              os.path.join(RETINAFACE_HOME, 'pretrained/mobilenetV1X0.25_pretrain.tar')],
+            'resnet50': [os.path.join(RETINAFACE_HOME, 'pretrained/Resnet50_Final.pth')]
         }
         self.url_dict = {
-            'mobilenet0.25': "https://drive.google.com/file/d/1AlY3yMYFGm0dTi7-lN4bq6T2McEJqrsv/view?usp=sharing", 
-            'resnet50': "https://drive.google.com/file/d/1RvJEqJL1htXEQ6tb9noMCq7v9tOgag_0/view?usp=sharing"
+            'mobilenet0.25': ["https://drive.google.com/file/d/1AlY3yMYFGm0dTi7-lN4bq6T2McEJqrsv/view?usp=sharing", 
+                              "https://drive.google.com/file/d/1q36RaTZnpHVl4vRuNypoEMVWiiwCqhuD/view?usp=share_link"], 
+            'resnet50': ["https://drive.google.com/file/d/1RvJEqJL1htXEQ6tb9noMCq7v9tOgag_0/view?usp=sharing"]
         }
         download(self.path_dict[arch], self.url_dict[arch])
         if arch == 'mobilenet0.25':

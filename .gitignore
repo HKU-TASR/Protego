@@ -5,7 +5,6 @@ __MACOSX/
 
 pytorch3d/
 tmp/
-trash/
 
 FR_DB/*/pretrained/
 FD_DB/*/pretrained/
@@ -17,9 +16,3 @@ smirk/assets/
 face_db/
 experiments/
 results/
-assets/advcloak/
-
-# Private paper / planning artifacts (never publish)
-MainPaper.pdf
-MainPaper.txt
-CodePublicationPlan.md
