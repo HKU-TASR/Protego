@@ -14,6 +14,7 @@ tqdm==4.66.2
 chumpy==0.70
 pytorch_lightning==2.2.1
 pytorch_msssim==1.0.0
+imageio-ffmpeg==0.6.0
 gdown
 fvcore
 iopath

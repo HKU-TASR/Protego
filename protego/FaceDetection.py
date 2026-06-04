@@ -35,7 +35,7 @@ def download(paths: List[str], urls: List[str]) -> None:
             if "uc?id" in url:
                 file_id = url.split("uc?id=")[-1]
                 downloaded_f = gdown.download(id=file_id, output=folder, quiet=False)
-            elif "view?usp=sharing" in url:
+            elif "view?usp=sharing" in url or "view?usp=share_link" in url:
                 downloaded_f = gdown.download(url=url, output=folder, fuzzy=True, quiet=False)
             if downloaded_f.endswith(".zip"):
                 with zipfile.ZipFile(downloaded_f, 'r') as zip_ref:
@@ -125,7 +125,9 @@ class MTCNN_Wrapper(object):
         }
         for key in self.path_dict:
             download(self.path_dict[key], self.url_dict[key])
-        self.model = MTCNN(weight_paths=self.path_dict, device=device)
+        self.model = MTCNN(weight_paths={'pnet': self.path_dict['mtcnn'][0],
+                                         'rnet': self.path_dict['mtcnn'][1],
+                                         'onet': self.path_dict['mtcnn'][2]}, device=device)
         self.preprocessing = transforms.Compose([transforms.Lambda(lambda x: x)]) # Identity transform
         self.drange = 255
 
@@ -214,7 +216,7 @@ class Retinaface(object):
             'out_channel': 256
             }
         self.model = RetinaFace(cfg=self.cfg, phase='test')
-        state_dict = torch.load(self.path_dict[arch], map_location=device, weights_only=False)
+        state_dict = torch.load(self.path_dict[arch][0], map_location=device, weights_only=False)
         if 'state_dict' in state_dict.keys():
             state_dict = self.remove_prefix(state_dict['state_dict'], 'module.')
         else:
