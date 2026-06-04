@@ -81,28 +81,55 @@ Linux + CUDA is the primary, recommended setup. macOS (MPS) is supported but slo
 
 ## Usage
 
-### Train a PPT
+### Train and evaluate a PPT
 
-`train.py` is the single train/eval entry point. It trains a PPT for every protectee found under `face_db/face_scrub/`, then runs the cross-protectee retrieval evaluation.
+#### Prepare the training data
+
+To train your own PPT for a protectee, whose name is `<protectee>`, place a folder of their facial images under `face_db/<your_dataset_name>/<protectee>/`. The final dataset structure should look like this:
+
+```plaintext
+face_db/
+└── <your_dataset_name>/
+    ├── <protectee_1>/
+    │   ├── img1.jpg
+    │   ├── img2.jpg
+    │   └── ...
+    ├── <protectee_2>/
+    │   ├── img1.jpg
+    │   ├── img2.jpg
+    │   └── ...
+    └── ...
+```
+
+The more images and the more diverse the poses/expressions, the better. The images can be cropped or uncropped. However, if the images are uncropped, you will need to set `need_cropping` to `True` tell the code to detect, crop, and throw out unusable images.
+
+#### Start training
+
+`train.py` is the single train/eval entry point. It trains a PPT for every protectee found under `face_db/<your_dataset_name>/`, then runs the cross-protectee retrieval evaluation.
 
 ```bash
 python train.py --exp_name my_experiment --device cuda:0
 ```
 
-Key configuration knobs (in the `configs` dict in [train.py](train.py)):
+See `train.py` for more configuration options. Remember to change [this line](./train.py#L78) in `train.py` to point to your own training dataset:
 
-| Knob | Meaning |
-| - | - |
-| `epsilon` | L∞ perturbation budget (default `16/255`). |
-| `min_ssim` | Minimum SSIM between protected and original images (visual-quality floor). |
-| `train_fr_names` | Ensemble of surrogate FR models the PPT is optimized against. |
-| `mask_size` | Resolution of the universal UV-space mask (default `224`). |
-| `epoch_num`, `batch_size`, `learning_rate` | Standard optimization controls. |
-| `bin_mask` | Restrict the perturbation to the visible face area. |
+```python
+train_data_path = os.path.join(BASE_PATH, 'face_db', '<your_dataset_name>')
+```
 
-Trained PPTs are saved to `experiments/<exp_name>/<protectee>/univ_mask.npy`.
+The trained PPTs will be saved to `experiments/my_experiment/<protectee>/univ_mask.npy`.
+
+#### Evaluate the trained PPT
+
+The training script automatically evaluates the trained PPTs on the preprocessed FaceScrub subset. To run the evaluation separately, switch `train.py` to the eval mode (comment [`run(cfgs, mode='train', data=data, train=train_protego_mask)`](./train.py#L93), uncomment [`run(cfgs, mode='eval', data=data)`](./train.py#L96) and set [`mask_name`](./train.py#L59) to `['my_experiment', 'univ_mask.npy']`).
+
+```bash
+python train.py --exp_name my_eval_experiment --device cuda:0
+```
 
 ### Protect images / videos with a trained PPT
+
+To apply a trained PPT to the images or videos of a protectee named `<protectee>`, place their images or videos under `face_db/imgs/<protectee>/` / `face_db/vids/<protectee>/` and run the corresponding script:
 
 ```bash
 python -m tools.protect_imgs   # protect a folder of images
@@ -110,12 +137,6 @@ python -m tools.protect_vids   # protect a video
 ```
 
 Edit the configuration block at the top of each script (protectee name, source/destination paths, mask name, `epsilon`, etc.). Both resolve paths relative to the repository root, so no machine-specific paths are required.
-
-### Evaluate
-
-The basic metric is the before/after retrieval recall on the preprocessed FaceScrub subset. To evaluate previously trained PPTs without retraining, switch `train.py` to the eval mode (uncomment the `run(cfgs, mode='eval', data=data)` line and set `mask_name` accordingly), or use the `protego.ipynb` notebook.
-
-The training notebook `train_protego.ipynb` walks through training a PPT on a small set of protectees and then evaluating it end-to-end.
 
 ## Acknowledgements
 

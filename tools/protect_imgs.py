@@ -25,10 +25,10 @@ if __name__ == "__main__":
         ####################################################################################################################
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         protectee_name = "Bradley_Cooper"
-        src_img_folder = f"{BASE_PATH}/face_db/face_scrub/{protectee_name}"
+        src_img_folder = f"{BASE_PATH}/face_db/imgs/{protectee_name}"
         dst_img_folder = f"{BASE_PATH}/results/imgs/{protectee_name}_protected"
         mask_names = ['default', 'univ_mask.npy']
-        need_detection = False
+        need_detection = True
         three_d = True
         use_bin_mask = True
         epsilon = 16 / 255.

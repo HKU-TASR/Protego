@@ -30,39 +30,39 @@ if __name__ == "__main__":
 
     configs = {
         # Running env
-        'global_random_seed': 42,
-        'device': 'cuda:0',
-        'exp_name': 'default',
+        'global_random_seed': 42, # Random seed for all random operations (data shuffling, model initialization, etc.) to ensure reproducibility.
+        'device': 'cuda:0', # The device to use. Will be overridden by the command line argument --device if provided.
+        'exp_name': 'default', # The name of the experiment. Will be used to create a subfolder under experiments/ to save the results. Will be overridden by the command line argument --exp_name if provided.
 
         # Training data
-        'train_portion': 0.6,
-        'uv_gen_align_ldmk': False,
-        'uv_gen_batch': 8,
-        'need_cropping': False,
-        'fd_name': 'mtcnn',
-        'crop_loosen': 1.,
+        'train_portion': 0.6, # The portion of images to use for training. The rest will be used for evaluation.
+        'uv_gen_align_ldmk': False, # ! Don't change
+        'uv_gen_batch': 8, # UV map generation batch size. Set to a larger number to speed up UV map generation, but it will consume more memory.
+        'need_cropping': False, # Set to True if the images are not tightly cropped around the face. Set to False otherwise.
+        'fd_name': 'mtcnn', # The face detector to use for cropping. Only used when need_cropping is True. (mtcnn, retinaface, mediapipe, etc.)
+        'crop_loosen': 1., # The looseness of cropping. Only used when need_cropping is True. 1 is recommended.
         'shuffle': False,
 
         # Training configs
-        'three_d': True,
+        'three_d': True, # ! Don't change.
         'epoch_num': 100,
         'batch_size': 16,
-        'epsilon': 16 / 255.,
-        'min_ssim': 0.95,
-        'learning_rate': 0.01 * (16 / 255.),
-        'mask_size': 224,
+        'epsilon': 16 / 255., # The maximum perturbation magnitude. 16/255 is recommended for a good balance between effectiveness and imperceptibility.
+        'min_ssim': 0.95, # The minimum required SSIM between the original image and the perturbed image. Set to a higher value for better visual quality, but it may reduce the effectiveness of the perturbation.
+        'learning_rate': 0.01 * (16 / 255.), # The learning rate for training. We recommend setting it to 0.01 times the epsilon value for stable training.
+        'mask_size': 224, # ! Don't change.
         'mask_random_seed': 114,
         'bin_mask': True,  # Whether to restrict the perturbation to the face area.
-        'train_fr_names': [n for n in BASIC_POOL if n != 'ir50_adaface_casia'],
+        'train_fr_names': [n for n in BASIC_POOL if n != 'ir50_adaface_casia'], # Surrogate FR models to use for training.
 
         # Eval configs
         'mask_name': ['default', 'univ_mask.npy'],
         'eval_db': 'face_scrub',
         'eval_fr_names': ['ir50_adaface_casia'],
-        'save_univ_mask': True,
-        'visualize_interval': 10,
-        'query_portion': 0.5,
-        'vis_eval': True,
+        'save_univ_mask': True, # ! Don't change.
+        'visualize_interval': 15, # The interval (in epochs) at which to visualize the results.
+        'query_portion': 0.5, # ! Don't change.
+        'vis_eval': True, # Whether to evaluate the visual quality of the perturbed images.
         'lpips_backbone': "vgg",
     }
     ####################################################################################################################
@@ -92,6 +92,5 @@ if __name__ == "__main__":
     # Train a PPT for every protectee, then run the cross-protectee retrieval evaluation.
     run(cfgs, mode='train', data=data, train=train_protego_mask)
 
-    # To evaluate previously trained PPTs (located under experiments/<mask_name[0]>/<protectee>/<mask_name[1]>)
-    # without retraining, use the eval mode instead:
+    # To evaluate previously trained PPTs (located under experiments/<mask_name[0]>/<protectee>/<mask_name[1]>) without retraining, use the eval mode instead:
     # run(cfgs, mode='eval', data=data)
