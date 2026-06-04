@@ -13,7 +13,7 @@ password=$(urle $password)
 echo -e "\nDownloading FLAME..."
 mkdir -p data/FLAME2020/
 wget --post-data "username=$username&password=$password" 'https://download.is.tue.mpg.de/download.php?domain=flame&sfile=FLAME2020.zip&resume=1' -O './FLAME2020.zip' --no-check-certificate --continue
-unzip FLAME2020.zip -d assets/FLAME2020/
+unzip FLAME2020.zip -d assets/
 rm FLAME2020.zip
 
 echo -e "\nDownloading Mediapipe Face Mesh model..."

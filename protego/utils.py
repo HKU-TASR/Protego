@@ -1,7 +1,6 @@
 import os
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional, Union
 import gc
-import sys
 import filelock
 
 import cv2
@@ -12,239 +11,280 @@ import PIL
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-from torch.utils.data import random_split as train_val_split
 from pytorch_msssim import ssim as calc_ssim
+import lpips
 
+from .FaceDetection import FD
 from .FacialRecognition import FR
-from .compression import compress
+from . import BASE_PATH
 
-BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def crop_face(img: torch.Tensor, 
+            detector: FD, 
+            conf_thresh: float = 0.8, 
+            min_h: int = 20, 
+            min_w: int = 20, 
+            crop_loosen: float = 1.0,
+            verbose: bool = True, 
+            strict: bool = False) -> Tuple[Optional[torch.Tensor], Optional[Tuple[int, int, int, int]]]:
+    """
+    Crop the face from the image using FD.
+
+    Args:
+        img (torch.Tensor): FloatTensor. Range [0, 255] or [0, 1]. Shape [3, H, W]. RGB.
+        conf_thresh (float): Confidence threshold for face detection. Not passed to the detection model, used only in post-processing.
+        min_h (int): Minimum height of the detected face.
+        min_w (int): Minimum width of the detected face.
+        crop_loosen (float): Factor to loosen the crop around the detected face. 1.0 means no change.
+        verbose (bool): Whether to print warnings.
+        strict (bool): Whether to return None, None if warnings are raised.
+
+    Returns:
+        Tuple[torch.Tensor, Tuple[int, int, int, int]]: The cropped face (Range is the same as input, RGB, [3, H, W]) and its position in the original image.
+    """
+    det_res = detector(img.float())
+    if det_res is None:
+        return None, None
+    bboxs = [list(det_res[i][:5]) for i in range(len(det_res))]
+    height, width = img.shape[1:]
+    cropped_face = None
+    position = None
+    largest_area = 0
+    for bbox in bboxs:
+        x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+        conf = bbox[4] 
+        if conf < conf_thresh:  # Confidence threshold
+            if verbose:
+                print(f"Discarding face with low confidence: {conf:.2f}")
+            continue
+        face_width = x2 - x1
+        face_height = y2 - y1
+        if face_height < min_h or face_width < min_w:
+            if verbose:
+                print(f"Discarding face with too small dimensions: width={face_width}, height={face_height}")
+            continue
+        face_area = face_width * face_height
+        if face_area < largest_area:
+            continue
+        largest_area = face_area
+
+        square_size = max(face_width, face_height)
+        if crop_loosen != 1.0:
+            square_size = int(square_size * crop_loosen)
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        full_size = min(square_size, width, height)
+        if full_size == width:
+            if verbose:
+                print(f"Warning: Original Image too narrow, cannot crop face properly.")
+            if strict:
+                return None, None
+            square_x1, square_x2 = 0, width
+            half_size = width // 2
+            square_y1 = center_y - half_size
+            square_y2 = center_y + half_size
+        elif full_size == height:
+            if verbose:
+                print(f"Warning: Original Image too short, cannot crop face properly.")
+            if strict:
+                return None, None
+            square_y1, square_y2 = 0, height
+            half_size = height // 2
+            square_x1 = center_x - half_size
+            square_x2 = center_x + half_size
+        elif full_size == square_size:
+            half_size = full_size // 2
+            square_x1 = center_x - half_size
+            square_y1 = center_y - half_size
+            square_x2 = center_x + half_size
+            square_y2 = center_y + half_size
+
+        cropped_face = img[:, square_y1:square_y2, square_x1:square_x2].clone()
+        position = (square_x1, square_y1, square_x2, square_y2)
+    if cropped_face is None or position is None:
+        if verbose:
+            print(f"Warning: No valid face detected that meets the criteria. conf_thresh: {conf_thresh}, min_h: {min_h}, min_w: {min_w}.")
+        return None, None
+    if cropped_face.shape[1] < min_h or cropped_face.shape[2] < min_w:
+        if verbose:
+            print(f"Warning: No valid face detected that meets the criteria. min_h: {min_h}, min_w: {min_w}.")
+        return None, None
+    x1, y1, x2, y2 = position
+    if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+        if verbose:
+            print(f"Warning: Cropped face goes out of image boundary. Image size: ({width}, {height}). Cropped position: ({x1}, {y1}, {x2}, {y2}).")
+        return None, None
+    return cropped_face, position
 
 def complete_del() -> None:
     gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    torch.backends.mps.empty_cache() if torch.backends.mps.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if hasattr(torch, "mps"):
+        is_available = getattr(torch.mps, "is_available", None)
+        empty_cache = getattr(torch.mps, "empty_cache", None)
+        if callable(is_available) and callable(empty_cache):
+            try:
+                if is_available():
+                    empty_cache()
+            except AttributeError:
+                # Older PyTorch builds may expose torch.backends.mps without torch.mps helpers
+                pass
 
-def img2tensor(img: np.ndarray, drange: int = 1) -> torch.Tensor:
+def img2tensor(img: np.ndarray, drange: int = 1, device: torch.device = torch.device('cpu')) -> torch.Tensor:
     """
     Convert a numpy image to a tensor.
 
     Args:
         img (np.ndarray): The numpy image to convert. Shape: (H, W, 3), dtype: uint8, range [0, 255].
         drange (int): The range of the image. Default is 1. Either 1 or 255.
+        device (torch.device): The device to store the tensor. Default is CPU.
 
     Returns:
-        torch.Tensor: The converted tensor. Shape: (1, 3, H, W), dtype: float32., range [0, 1].
+        torch.Tensor: The converted tensor. Shape: (1, 3, H, W), dtype: float32., range [0, 1] or [0, 255], depending on drange.
     """
-    img_tensor = torch.tensor(img, dtype=torch.float32, device=torch.device('cpu'))
+    img_tensor = torch.tensor(img, dtype=torch.float32, device=device).to(device)
     img_tensor = img_tensor.permute(2, 0, 1)
     if drange == 1:
         img_tensor /= 255. 
     img_tensor = img_tensor.unsqueeze(0)
-    return torch.clamp(img_tensor, 0, 1)
+    return img_tensor
 
-def load_imgs(base_dir: str, img_sz: int, usage_portion: float = 1.0, drange: int = 1) -> torch.Tensor:
+def load_mask(mask_path: str, device: torch.device = torch.device("cpu")) -> torch.Tensor:
     """
-    Read images from a directory and convert them to tensors.
+    Load a universal mask from a .npy file.
+
+    Args:
+        mask_path (str): The path to the .npy file containing the mask.
+        device (torch.device): The device to store the tensor. Default is CPU.
+
+    Returns:
+        torch.Tensor: The loaded mask tensor. Shape: (1, 3, H, W), dtype: float32., range [0, 1].
+    """
+    return torch.tensor(np.load(mask_path, allow_pickle=True)[0], dtype=torch.float32, device=device).to(device).unsqueeze(0)
+
+def load_imgs(base_dir: str = None, img_paths: Optional[List[str]] = None, img_sz: int = 224, usage_portion: float = 1.0, drange: int = 1, device: torch.device = torch.device('cpu'), return_img_paths: bool = False) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor, List[str]], Tuple[List[torch.Tensor], List[str]]]:
+    """
+    Read images from a directory and convert them to tensors. If base dir is given, only imgs in ['jpg', 'png', 'jpeg', 'bmp'] format and NOT starting with '.' or '_' will be read.
 
     Args:
         base_dir (str): The directory containing the images.
-        img_sz (int): The size of the image.
+        img_paths (List[str]): The list of image paths. If provided, base_dir will be ignored.
+        img_sz (int): The size of the image. If set to -1, it will not be resized. 
         usage_portion (float): The portion of the images to use.
         drange (int): The range of the image. Default is 1. Either 1 or 255.
+        device (torch.device): The device to store the tensor. Default is CPU.
+        return_img_paths (bool): Whether to return the list of image paths.
 
     Returns:
-        torch.Tensor: The tensor of the images. Shape [B, 3, img_sz, img_sz]. RGB, range [0, 1], dtype: float32.
+        Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor, List[str]], Tuple[List[torch.Tensor], List[str]]]: The tensor of the images. Shape [B, 3, img_sz, img_sz]. RGB, range [0, 1], dtype: float32.
+        A list of tensors with shape [1, 3, H, W] if img_sz is -1. Will also return the list of image paths if return_img_paths is True.
     """
     img_tensors = []
-    img_num = len(os.listdir(base_dir))
-    imgs_names = [name for name in os.listdir(base_dir) if name.endswith(('.jpg', '.png', '.jpeg', '.bmp')) and not (name.startswith('.') or name.startswith('_'))]
-    for file_name in sorted(imgs_names):
-        img_path = os.path.join(base_dir, file_name)
-        img = PIL.Image.open(img_path).convert('RGB')
+    valid_img_paths = []
+    if base_dir is not None and img_paths is None:
+        img_num = len(os.listdir(base_dir))
+        imgs_names = sorted([os.path.join(base_dir, name) for name in os.listdir(base_dir) if name.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp')) and not (name.startswith('.') or name.startswith('_'))])
+    elif img_paths is not None and base_dir is None:
+        img_num = len(img_paths)
+        imgs_names = img_paths
+    else:
+        raise ValueError("Either base_dir or img_paths should be provided, but not both or neither.")
+    for img_idx, img_path in enumerate(imgs_names):
+        try:
+            img = PIL.Image.open(img_path).convert('RGB')
+        except Exception as e:
+            print(f"Warning: Failed to open image {img_path}. Skipping. Error: {e}")
+            continue
         img = np.array(img)
-        img = cv2.resize(img, (img_sz, img_sz), interpolation=cv2.INTER_LANCZOS4 if img.shape[0] < img_sz else cv2.INTER_AREA)
-        img_tensors.append(img2tensor(img, drange=drange))
+        if img_sz != -1:
+            img = cv2.resize(img, (img_sz, img_sz), interpolation=cv2.INTER_LANCZOS4 if img.shape[0] < img_sz else cv2.INTER_AREA)
+        img_tensors.append(img2tensor(img, drange=drange, device=device))
+        if return_img_paths:
+            valid_img_paths.append(img_path)
         if len(img_tensors) >= int(img_num * usage_portion):
             break
-    return torch.cat(img_tensors, dim=0)
+    imgs = torch.cat(img_tensors, dim=0) if img_sz != -1 else img_tensors
+    if return_img_paths:
+        return imgs, valid_img_paths
+    return imgs
 
-def load_uvs(base_dir: str, usage_portion: float = 1.0) -> torch.Tensor:
+def preextract_features(base_path: str, fr: FR, device: torch.device, save_name: str) -> None:
     """
-    Read UV maps from a directory. 
+    A unified gateway to pre-extract features for all images in the given directory.
 
     Args:
-        base_dir (str): The directory containing the UV maps.
-        usage_portion (float): The portion of the UV maps to use.
-
-    Returns:
-        torch.Tensor: The tensor of the UV maps. Shape [B, 224, 224, 2]. Range [-1, 1], dtype: float32.
-
-    Raises:
-        FileNotFoundError: If the UV maps file does not exist in the specified directory.
+        base_path (str): The path to the database directory.
+        fr (FR): The facial recognition model.
+        device (torch.device): The device to use for computation.
+        save_name (str): The name to save the extracted features.
     """
-    uvs_path = os.path.join(base_dir, 'uvs.pt')
-    if not os.path.exists(uvs_path):
-        raise FileNotFoundError(f"UV maps not found in {uvs_path}. Please generate UV maps first.")
-    uvs = torch.load(uvs_path, weights_only=False)    
-    img_num = uvs.shape[0]
-    if usage_portion < 1.0:
-        uvs = uvs[:int(img_num * usage_portion)]
-    return uvs
-
-def load_bin_masks(base_dir: str, usage_portion: float = 1.0) -> torch.Tensor:
-    """
-    Read binary masks from a directory.
-
-    Args:
-        base_dir (str): The directory containing the binary masks.
-        usage_portion (float): The portion of the UV maps to use.
-
-    Returns:
-        torch.Tensor: The tensor of the binary masks. Shape [B, 1, H, W]. Range [0, 1], dtype: float32.
-
-    Raises:
-        FileNotFoundError: If the binary masks file does not exist in the specified directory.
-    """
-    bin_mask_path = os.path.join(base_dir, 'visibility_masks.pt')
-    if not os.path.exists(bin_mask_path):
-        raise FileNotFoundError(f"Binary Masks not found in {bin_mask_path}. Please generate Binary Masks first.")
-    bin_masks = torch.load(bin_mask_path, weights_only=False)
-    img_num = bin_masks.shape[0]
-    if usage_portion < 1.0:
-        bin_masks = bin_masks[:int(img_num * usage_portion)]
-    return bin_masks.permute(0, 3, 1, 2).float()  # Convert to [B, 1, H, W] format
-
-def split(imgs: torch.Tensor, uvs: torch.Tensor, bin_masks: torch.Tensor, train_portion: float, random_split: bool, shuffle: bool, batch_size: int, num_threads: int = 4, pin_memory: bool = True) -> Tuple[DataLoader, DataLoader]:
-    """
-    Split the dataset into a training and validation set.
-
-    Args:
-        imgs (torch.Tensor): The tensor of the images. Shape [B, 3, H, W].
-        uvs (torch.Tensor): The tensor of the UV maps. Shape [B, 224, 224, 2]. You may set it to None. 
-        bin_masks (torch.Tensor): The tensor of the binary masks. Shape [B, 224, 224, 1]. You may set it to None. 
-        train_portion (float): The portion of the each person's images to be used as the training set.
-        random_split (bool): Whether to randomly split the dataset. If True, the images will be shuffled before splitting.
-        batch_size (int): The batch size for the DataLoader.
-        shuffle (bool): Whether to shuffle the datasets.
-        num_threads (int): The number of threads to use for the DataLoader. Default is 4.
-        pin_memory (bool): Whether to pin memory for the DataLoader. Default is True.
-
-    Returns:
-        Tuple[DataLoader, DataLoader]: A tuple containing the DataLoader for the training and validation set. The validation set's batch size is set to 32.
-
-    Raises:
-        ValueError: If the number of images, UV maps, and binary masks do not match. Or if the specified data combinations are not allowed.
-    """
-    
-    if bin_masks is None and uvs is None:
-        dataset = TensorDataset(imgs)
-    elif bin_masks is None and uvs is not None:
-        assert imgs.shape[0] == uvs.shape[0], "The number of images and UV maps must be the same."
-        dataset = TensorDataset(imgs, uvs)
-    elif bin_masks is not None and uvs is None:
-        assert imgs.shape[0] == bin_masks.shape[0], "The number of images and binary masks must be the same."
-        dataset = TensorDataset(imgs, bin_masks)
-    elif bin_masks is not None and uvs is not None:
-        assert imgs.shape[0] == uvs.shape[0] == bin_masks.shape[0], "The number of images, UV maps, and binary masks must be the same."
-        dataset = TensorDataset(imgs, uvs, bin_masks)
+    usable_imgs = os.path.join(base_path, 'imgs_list.txt')
+    if os.path.exists(usable_imgs):
+        img_names = get_usable_img_paths(base_path)
+        imgs = load_imgs(img_paths=img_names, img_sz=224, usage_portion=1., drange=1, device=device)
     else:
-        raise ValueError("Allowed combinations of inputs: (imgs), (imgs, bin_masks), (imgs, uvs), (imgs, uvs, bin_masks).")
-    total_size = len(dataset)
-    train_size = int(total_size * train_portion)
-    val_size = total_size - train_size
+        imgs, img_names = load_imgs(base_dir=base_path, img_sz=224, usage_portion=1., drange=1, device=device, return_img_paths=True)
+    lockfile = filelock.FileLock(os.path.join(base_path, f"{save_name}.lock"))
+    with lockfile:
+        torch.save(fr(imgs).detach().cpu(), os.path.join(base_path, save_name))
+    lockfile.release()
+    if not os.path.exists(usable_imgs):
+        with open(usable_imgs, 'w') as f:
+            for img_name in img_names:
+                f.write(os.path.relpath(img_name, base_path) + '\n')
 
-    if random_split:
-        train_dataset, val_dataset = train_val_split(dataset, [train_size, val_size])
-    else:
-        if bin_masks is None and uvs is None:
-            train_dataset = TensorDataset(imgs[:train_size])
-            val_dataset = TensorDataset(imgs[train_size:])
-        elif bin_masks is None and uvs is not None:
-            train_dataset = TensorDataset(imgs[:train_size], uvs[:train_size])
-            val_dataset = TensorDataset(imgs[train_size:], uvs[train_size:])
-        elif bin_masks is not None and uvs is None:
-            train_dataset = TensorDataset(imgs[:train_size], bin_masks[:train_size])
-            val_dataset = TensorDataset(imgs[train_size:], bin_masks[train_size:])
-        elif bin_masks is not None and uvs is not None:
-            train_dataset = TensorDataset(imgs[:train_size], uvs[:train_size], bin_masks[:train_size])
-            val_dataset = TensorDataset(imgs[train_size:], uvs[train_size:], bin_masks[train_size:])
+def get_usable_img_paths(base_dir: str) -> List[str]:
+    imgs = []
+    with open(os.path.join(base_dir, 'imgs_list.txt'), 'r') as f:
+        for line in f.readlines():
+            imgs.append(os.path.join(base_dir, line.strip()))
+    return imgs
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_threads, pin_memory=pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=shuffle, num_workers=num_threads, pin_memory=pin_memory)
-
-    return train_loader, val_loader
-
-def build_facedb(db_path: str, fr_name: str, device: torch.device) -> Dict[str, torch.Tensor]:
+def build_facedb(db_path: str, fr: Union[str, FR], device: torch.device, return_img_paths: bool = False) -> Union[Dict[str, torch.Tensor], Dict[str, Tuple[torch.Tensor, List[str]]]]:
     """
     Build a database of features from the images in the given directory. Folders starting with '.' or '_' will be ignored.
 
     Args:
         db_path (str): The path to the database directory.
-        fr_name (str): The name of the facial recognition model to use.
+        fr (Union[str, FR]): The facial recognition model or the name of the model to use.
         device (torch.device): The device to use for computation.
+        return_img_paths (bool): Whether to return the list of image paths along with the features.
 
     Returns:
-        Dict[str, torch.Tensor]: A dictionary containing the features for each person in the database.
+        Union[Dict[str, torch.Tensor], Dict[str, Tuple[torch.Tensor, List[str]]]]: A dictionary containing the features for each person in the database.
+         - Dict[str, torch.Tensor]: A dictionary containing the features for each person in the database.
+         - Dict[str, Tuple[torch.Tensor, List[str]]]: A dictionary containing the features and image paths for each person in the database if return_img_paths is True.
     """
     db = {}
-    for name in sorted(os.listdir(db_path)):
-        if name.startswith('.') or name.startswith('_'):
-            continue
+    names = sorted([n for n in os.listdir(db_path) if not n.startswith(('.', '_'))])
+    fr_name = fr if isinstance(fr, str) else fr.model_name
+    fr_model = None
+    for name in names:
         personal_path = os.path.join(db_path, name)
-        features = torch.load(os.path.join(personal_path, f'{fr_name}.pt'))
+        feature_path = os.path.join(personal_path, f'{fr_name}.pt')
+        try:
+            features = torch.load(feature_path, map_location=device, weights_only=False)
+        except Exception as e:
+            print(f"{fr_name} features of {name} not found or failed to load. (Re)Extracting features. Error: {e}")
+            if isinstance(fr, str) and fr_model is None:
+                fr_model = FR(model_name=fr, device=device)
+            elif isinstance(fr, FR) and fr_model is None:
+                fr_model = fr
+            preextract_features(base_path=personal_path, fr=fr_model, device=device, save_name=f'{fr_name}.pt')
+            features = torch.load(feature_path, map_location=device, weights_only=False)
         db[name] = features.to(device)
+        if return_img_paths:
+            img_paths = get_usable_img_paths(personal_path)
+            db[name] = (features.to(device), img_paths)
     return db
 
-def build_compressed_face_db(db_path: str, fr: FR, device: torch.device, compression_methods: List[str], compression_cfgs: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, torch.Tensor]]:
-    """
-    Build a database of features from the compressed images in the given directory.
-
-    Args:
-        db_path (str): The path to the database directory.
-        fr_name (str): The name of the facial recognition model to use.
-        device (torch.device): The device to use for computation.
-        compression_methods (List[str]): The list of compression methods to use.
-        compression_cfgs (Dict[str, Dict[str, Any]]): The configurations for each compression method.
-
-    Returns:
-        Dict[str, Dict[str, torch.Tensor]]: {'compression_method': {'name': features}}
-    """
-    with torch.no_grad():
-        db = {compression_method: {} for compression_method in compression_methods}
-        pbar = tqdm.tqdm(os.listdir(db_path), desc="Building compressed face database")
-        for name in pbar:
-            if name.startswith('.') or name.startswith('_'):
-                continue
-            personal_path = os.path.join(db_path, name)
-            for method in compression_methods:
-                cfgs_str = ''
-                for k, v in compression_cfgs[method].items():
-                    cfgs_str += f"_{k}_{v}"
-                f_name = os.path.join(personal_path, f"{fr.model_name}_{method}{cfgs_str}.pt")
-                if not os.path.exists(f_name):
-                    img_tensors = load_imgs(personal_path, img_sz=224, usage_portion=1.0, drange=1)
-                    tmp_dl = DataLoader(img_tensors, batch_size=32, shuffle=False)
-                    compressed_features = []
-                    for imgs in tqdm.tqdm(tmp_dl, desc=f"Compressing and extracting features for {name} with {method} under the setting of {compression_cfgs[method]}"):
-                        imgs = imgs.to(device)
-                        compressed_features.append(fr(compress(imgs = imgs, method = method, differentiable = False, **compression_cfgs[method])).cpu())
-                    compressed_features = torch.cat(compressed_features, dim=0)
-                    db[method][name] = compressed_features.to(device)
-                    with filelock.FileLock(f_name + ".lock"):
-                        torch.save(compressed_features, f_name)
-                else:
-                    db[method][name] = torch.load(f_name, map_location=device, weights_only=False)
-                    db[method][name] = db[method][name].to(device)
-    return db
-        
 def cal_norms(x: torch.Tensor, y: torch.Tensor, epsilon: float) -> Dict[str, float]:
         """
         Calculate the norms between two tensors. Include l0, l1, l2, linf, and PSNR.
 
         Args:
-            x (torch.Tensor): The first batch of images.
-            y (torch.Tensor): The second batch of images.
+            x (torch.Tensor): The first batch of images. Shape: [B, 3, H, W], range [0, 1], dtype torch.float32
+            y (torch.Tensor): The second batch of images. Shape: [B, 3, H, W], range [0, 1], dtype torch.float32
             epsilon (float): The maximum perturbation value. 
 
         Returns:
@@ -262,7 +302,7 @@ def cal_norms(x: torch.Tensor, y: torch.Tensor, epsilon: float) -> Dict[str, flo
         psnr = 20 * np.log10(1.0 / np.sqrt(mse)).item() if mse > 0 else float('inf')
         return {'l0': l0, 'l1': l1, 'l2': l2, 'linf': linf, 'psnr': psnr}
 
-def retrieve(db: torch.Tensor, db_labels: List[str], queries: torch.Tensor, query_labels: List[str], dist_func: str) -> List[float]:
+def retrieve(db: torch.Tensor, db_labels: List[str], queries: torch.Tensor, query_labels: List[str], dist_func: str, topk: int, sorted_retrieval: bool = True, return_retrieved_idxs: bool = False) -> Union[List[float], Tuple[List[float], List[List[int]]]]:
     """
     Assume k queries in total. For each query, determine how many of the top-k retrievals are correct. 
 
@@ -272,28 +312,39 @@ def retrieve(db: torch.Tensor, db_labels: List[str], queries: torch.Tensor, quer
         queries (torch.Tensor): The query features. Shape: (K, D), where K is the number of queries.
         query_labels (List[str]): The labels of the query features.
         dist_func (str): The distance function to use. Either 'cosine' or 'euclidean'.
+        topk (int): The number of top retrievals to consider.
+        sorted_retrieval (bool): Whether to sort the retrievals by the similarity/distance score. (Monotonically decreasing in terms of similarity, conceptually, whether cosine or euclidean distance)
+        return_retrieved_idxs (bool): Whether to return the retrieved indexes in the db Tensor.
 
     Returns:
-        List[float]: For each query, how many of the top-k retrievals are correct.
+        Union[List[float], Tuple[List[float], List[List[int]]]]:
+         - List[float]: For each query, how many of the top-k retrievals are correct. If return_retrieved_idxs is False.
+         - Tuple[List[float], List[List[int]]]: For each query, how many of the top-k retrievals are correct, and the retrieved indexes in the db Tensor. If return_retrieved_idxs is True.
     """
-    k = queries.shape[0] # The number of queries
+    #k = queries.shape[0] # The number of queries
+    k = topk
     if dist_func == 'cosine':
         matrix = torch.matmul(F.normalize(queries, p=2, dim=1), F.normalize(db, p=2, dim=1).T)
-        db_matches_idxs = matrix.topk(k, dim=1, largest=True, sorted=False)[1]
+        db_matches_idxs = matrix.topk(k, dim=1, largest=True, sorted=sorted_retrieval)[1]
     elif dist_func == 'euclidean':
         matrix = torch.cdist(queries, db, p=2)
-        db_matches_idxs = matrix.topk(k, dim=1, largest=False, sorted=False)[1]
+        db_matches_idxs = matrix.topk(k, dim=1, largest=False, sorted=sorted_retrieval)[1]
     else:
         raise ValueError(f"Unsupported distance function: {dist_func}. Use 'cosine' or 'euclidean'.")
     accus = []
-    for i in range(k):
+    retrieved_idxs = []
+    for i in range(queries.shape[0]):
         query_label = query_labels[i]
         db_matches = db_matches_idxs[i]
         correct_count = sum(1 for idx in db_matches if db_labels[idx] == query_label)
         accus.append(correct_count / k)
+        if return_retrieved_idxs:
+            retrieved_idxs.append(db_matches.detach().cpu().numpy().tolist())
+    if return_retrieved_idxs:
+        return accus, retrieved_idxs
     return accus
 
-def prot_eval(orig_features: torch.Tensor, protected_features: torch.Tensor, face_db: Dict[str, torch.Tensor], dist_func: str, query_portion: float, device: torch.device) -> Dict[str, float]:
+def prot_eval(orig_features: torch.Tensor, protected_features: torch.Tensor, face_db: Dict[str, torch.Tensor], dist_func: str, query_portion: float, device: torch.device, verbose: bool = False) -> Dict[str, float]:
     """
     Protection evaluation function. It evaluates the retrieval accuracy of protected and unprotected queries against a database of facial features.
 
@@ -322,52 +373,67 @@ def prot_eval(orig_features: torch.Tensor, protected_features: torch.Tensor, fac
 
     dist_func = dist_func
     #dist_func = fr.dis_func
-    # print('===== Search with unprotected queries =====')    
+    # Case 1: Search with unprotected queries
+    if verbose:
+        print('===== Search with unprotected queries =====')    
     query_features = orig_features[:query_num]
     # (a) Protected entries should not be retrieved as top matches
-    # print("Protected entries should not be retrieved as top matches")
+    if verbose:
+        print("Protected entries should not be retrieved as top matches")
     db_features = torch.cat([noise_features, protected_features[query_num:]], dim=0)
     one_as = retrieve(db=db_features, 
                      db_labels=db_labels, 
                      queries=query_features, 
                      query_labels=query_labels, 
-                     dist_func=dist_func)
+                     dist_func=dist_func, 
+                     topk=img_num - query_num)
     one_a = sum(one_as) / len(one_as)
-    # print(f"1A Retrieval accuracy: {one_a:.4f} (lower is better)")
+    if verbose:
+        print(f"1A Retrieval accuracy: {one_a:.4f} (lower is better)")
     # (b) Unprotected entries are deemed to be retrieved as top matches
-    # print("Unprotected entries are deemed to be retrieved as top matches")
+    if verbose:
+        print("Unprotected entries are deemed to be retrieved as top matches")
     db_features = torch.cat([noise_features, orig_features[query_num:]], dim=0)
     one_bs = retrieve(db=db_features, 
                      db_labels=db_labels, 
                      queries=query_features, 
                      query_labels=query_labels, 
-                     dist_func=dist_func)
+                     dist_func=dist_func, 
+                     topk=img_num - query_num)
     one_b = sum(one_bs) / len(one_bs)
-    # print(f"1B Retrieval accuracy: {one_b:.4f} (higher is better)")
+    if verbose:
+        print(f"1B Retrieval accuracy: {one_b:.4f} (higher is better)")
 
     # Case 2: Search with protected queries
-    # print('===== Search with protected queries =====')
+    if verbose:
+        print('===== Search with protected queries =====')
     query_features = protected_features[:query_num]
     # (a) Protected entries should not be retrieved as top matches
-    # print("Protected entries should not be retrieved as top matches")
+    if verbose:
+        print("Protected entries should not be retrieved as top matches")
     db_features = torch.cat([noise_features, protected_features[query_num:]], dim=0)
     two_as = retrieve(db=db_features, 
                      db_labels=db_labels, 
                      queries=query_features, 
                      query_labels=query_labels, 
-                     dist_func=dist_func)
+                     dist_func=dist_func, 
+                     topk=img_num - query_num)
     two_a = sum(two_as) / len(two_as)
-    # print(f"2A Retrieval accuracy: {two_a:.4f} (lower is better)")
+    if verbose:
+        print(f"2A Retrieval accuracy: {two_a:.4f} (lower is better)")
     # (b) Unprotected entries should not be retrieved as top matches
-    # print("Unprotected entries should not be retrieved as top matches")
+    if verbose:
+        print("Unprotected entries should not be retrieved as top matches")
     db_features = torch.cat([noise_features, orig_features[query_num:]], dim=0)
     two_bs = retrieve(db=db_features, 
                      db_labels=db_labels, 
                      queries=query_features, 
                      query_labels=query_labels, 
-                     dist_func=dist_func)
+                     dist_func=dist_func, 
+                     topk=img_num - query_num)
     two_b = sum(two_bs) / len(two_bs)
-    # print(f"2B Retrieval accuracy: {two_b:.4f} (lower is better)")
+    if verbose:
+        print(f"2B Retrieval accuracy: {two_b:.4f} (lower is better)")
 
     return {'1a': one_a,'1b': one_b,'2a': two_a,'2b': two_b}
 
@@ -378,9 +444,11 @@ def eval_masks(three_d: bool,
             device: torch.device, 
             bin_mask: bool, 
             epsilon: float, 
-            masks: np.ndarray, 
+            masks: torch.Tensor,
             query_portion: float = 0.5, 
-            vis_eval: bool = True) -> Dict[str, float]:
+            vis_eval: bool = True, 
+            lpips_backbone: str = "vgg", 
+            verbose: bool = False) -> Dict[str, float]:
     """
     Evaluate masks against a database of facial features.
 
@@ -392,17 +460,21 @@ def eval_masks(three_d: bool,
         device (torch.device): The device to use for computation.
         bin_mask (bool): Whether to use binary masks.
         epsilon (float): The maximum perturbation value.
-        masks (np.ndarray): The masks to apply. Shape: (B, 3, H, W). Range: [-epsilon, epsilon]. dtype: np.float32.
+        masks (torch.Tensor): The masks to apply. Shape: (B, 3, H, W). Range: [-epsilon, epsilon]. dtype: np.float32.
         query_portion (float): The portion of the test data to use as queries.
         vis_eval (bool): Whether to visualize the evaluation results.
+        lpips_backbone (str): The backbone to use for LPIPS calculation. 'vgg', 'alex', or 'squeeze'.
+        verbose (bool): Whether to print the evaluation results.
 
     Returns:
         Dict[str, float]: A dictionary containing the evaluation results. Includes retrieval accuracies, various norms, and visual quality metrics.
     """
-    tensor_masks = torch.tensor(masks, dtype=torch.float32, device=device)
+    tensor_masks = masks
     img_cnt = 0
     orig_features, protected_features = [], []
-    ssims, psnrs, l0s, l1s, l2s, linfs = [], [], [], [], [], []
+    ssims, psnrs, lpipses, l0s, l1s, l2s, linfs = [], [], [], [], [], [], []
+    if vis_eval:
+        lpips_evaluator = lpips.LPIPS(net=lpips_backbone).to(device)
     for idx, tensors in tqdm.tqdm(enumerate(test_data), total=len(test_data), desc="Applying mask, extracting features, and evaluating visual quality"):
         orig_faces = tensors[0].to(device)  # Shape: [B, 3, H, W]
         img_num = orig_faces.shape[0]
@@ -423,6 +495,7 @@ def eval_masks(three_d: bool,
             prot_img = prot_img.unsqueeze(0)
             orig_img = orig_img.unsqueeze(0)
             if vis_eval:
+                lpipses.append(lpips_evaluator(prot_img * 2 - 1, orig_img * 2 - 1).mean().detach().cpu().numpy().item())
                 ssims.append(calc_ssim(prot_img, orig_img, data_range=1, size_average=True).cpu().numpy().item())
                 norms = cal_norms(prot_img, orig_img, epsilon)
                 l0s.append(norms['l0'])
@@ -434,7 +507,7 @@ def eval_masks(three_d: bool,
     complete_del()
 
     if not vis_eval:
-        psnrs, ssims, l0s, l1s, l2s, linfs = [0], [0], [0], [0], [0], [0]
+        psnrs, ssims, lpipses, l0s, l1s, l2s, linfs = [0], [0], [0], [0], [0], [0], [0]
     mean_l0 = np.mean(l0s).item()
     max_l0 = max(l0s)
     min_l0 = min(l0s)
@@ -453,6 +526,9 @@ def eval_masks(three_d: bool,
     mean_psnr = np.mean(psnrs).item()
     max_psnr = max(psnrs)
     min_psnr = min(psnrs)
+    mean_lpips = np.mean(lpipses).item()
+    max_lpips = max(lpipses)
+    min_lpips = min(lpipses)
     orig_features = torch.cat(orig_features, dim=0).to(device)
     protected_features = torch.cat(protected_features, dim=0).to(device)
 
@@ -461,7 +537,8 @@ def eval_masks(three_d: bool,
                          face_db=face_db,
                          dist_func='cosine',
                          query_portion=query_portion,
-                         device=device)
+                         device=device,
+                         verbose=verbose)
     one_a = prot_res['1a']
     one_b = prot_res['1b']
     two_a = prot_res['2a']
@@ -489,216 +566,72 @@ def eval_masks(three_d: bool,
         'ssim_min': min_ssim,
         'psnr': mean_psnr,
         'psnr_max': max_psnr,
-        'psnr_min': min_psnr
+        'psnr_min': min_psnr, 
+        'lpips': mean_lpips,
+        'lpips_max': max_lpips,
+        'lpips_min': min_lpips
     }
 
-def compression_eval(compression_methods: List[str], 
-                    compression_cfgs: Dict[str, Dict[str, Any]],
-                    three_d: bool, 
-                    test_data: DataLoader, 
-                    face_db: Dict[str, Dict[str, torch.Tensor]], 
-                    fr: FR, 
-                    device: torch.device, 
-                    bin_mask: bool, 
-                    epsilon: float, 
-                    masks: np.ndarray, 
-                    query_portion: float = 0.5) -> Dict[str, Dict[str, float]]:
+def visualize_mask(
+    orig_img: torch.Tensor,
+    uv: torch.Tensor,
+    bin_mask: torch.Tensor,
+    univ_mask: torch.Tensor,
+    save_path: str,
+    epsilon: float, 
+    use_bin_mask: bool,
+    three_d: bool
+) -> None:
     """
-    Evaluate the masks' robustness against different compression methods.
+    Visualize the original image, protected image, universal mask, perturbation, UV map, and binary mask.
 
     Args:
-        compression_methods (List[str]): The list of compression methods to evaluate.
-        compression_cfgs (Dict[str, Dict[str, Any]]): The configurations for each compression method.
+        orig_img (torch.Tensor): The original image. Shape: (3, H, W). Range: [0, 1].
+        uv (torch.Tensor): The UV map. Shape: (H, W, 2). 
+        bin_mask (torch.Tensor): The binary mask. Shape: (1, H, W).
+        univ_mask (torch.Tensor): The universal mask. Shape: (1, 3, H, W). Range: [-epsilon, epsilon].
+        save_path (str): The path to save the visualization.
+        epsilon (float): The maximum perturbation value.
+        use_bin_mask (bool): Whether to use the binary mask.
         three_d (bool): Whether to use 3D masks.
-        test_data (DataLoader): The DataLoader containing the test data.
-        face_db (Dict[str, Dict[str, torch.Tensor]]): The database of facial features for different compression methods.
-        fr (FR): The facial recognition model.
-        device (torch.device): The device to use for computation.
-        bin_mask (bool): Whether to use binary masks.
-        epsilon (float): The maximum perturbation value.
-        masks (np.ndarray): The masks to apply. Shape: (B, 3, H, W). Range: [-epsilon, epsilon]. dtype: np.float32.
-        query_portion (float): The portion of the test data to use as queries.
-
-    Returns:
-        Dict[str, Dict[str, float]]: A dictionary containing the evaluation results for each compression method.
-        Each method's results include '1a', '1b', '2a', '2b'.
     """
-    
-    tensor_masks = torch.tensor(masks, dtype=torch.float32, device=device)
-    prot_res = {}
-    for method in compression_methods:
-        img_cnt = 0
-        orig_features, protected_features = [], []
-        for idx, tensors in tqdm.tqdm(enumerate(test_data), total=len(test_data), desc=f"Compressing imgs with {method}, Applying mask, and extracting features"):
-            orig_faces = tensors[0].to(device)  # Shape: [B, 3, H, W]
-            img_num = orig_faces.shape[0]
-            if three_d:
-                uvs = tensors[1].to(device)
-                textures = tensor_masks[img_cnt:img_cnt + img_num].to(device)  # Shape: [B, 224, 224, 3]
-                perturbations = torch.clamp(F.grid_sample(textures, uvs, mode='bilinear', align_corners=True), -epsilon, epsilon)
-            else:
-                perturbations = tensor_masks[img_cnt:img_cnt + img_num].to(device)
-            if bin_mask:
-                bin_masks = tensors[2].to(device)
-                perturbations *= bin_masks
-            protected_faces = torch.clamp(orig_faces + perturbations, 0, 1)
-            compressed_protected_faces = compress(imgs = protected_faces, method = method, differentiable = False, **compression_cfgs[method])
-            compressed_orig_faces = compress(imgs = orig_faces, method = method, differentiable = False, **compression_cfgs[method])
-
-            img_cnt += img_num
-            orig_features.append(fr(compressed_orig_faces).cpu())
-            protected_features.append(fr(compressed_protected_faces).cpu())
-            for prot_img, orig_img in zip(protected_faces, orig_faces):
-                prot_img = prot_img.unsqueeze(0)
-                orig_img = orig_img.unsqueeze(0)
-        del orig_faces, protected_faces, perturbations
-        complete_del()
-        orig_features = torch.cat(orig_features, dim=0).to(device)
-        protected_features = torch.cat(protected_features, dim=0).to(device)
-
-        prot_res[method] = prot_eval(orig_features=orig_features,
-                                        protected_features=protected_features,
-                                        face_db=face_db[method],
-                                        dist_func='cosine',
-                                        query_portion=query_portion,
-                                        device=device)
-    return prot_res
-
-def visualize_3dmask(orig_img: torch.Tensor, 
-                    uv: torch.Tensor,
-                    save_path: str, 
-                    epsilon: float,
-                    univ_texture: torch.Tensor = None, 
-                    additional_texture: torch.Tensor = None, 
-                    bin_mask: torch.Tensor = None) -> None: 
-    """
-    Visualize the 3D mask on the original image and save the result.
-
-    Args:
-        orig_img (torch.Tensor): The original image. Shape: (1, 3, H, W).
-        uv (torch.Tensor): The UV map. Shape: (1, H, W, 2).
-        save_path (str): The path to save the visualization.
-        epsilon (float): The maximum perturbation value.
-        univ_texture (torch.Tensor): The universal texture to visualize. Shape: (1, 3, H, W)
-        additional_texture (torch.Tensor): Additional texture to visualize. Shape: (1, 3, H, W)
-        bin_mask (torch.Tensor): The binary mask to apply. Shape: (1, 1, H, W). If None, no binary mask is applied.
-    """
-    assert not (univ_texture is None and additional_texture is None), "Either univ_texture or additional_texture must be provided."
-    if univ_texture is not None and additional_texture is not None:
-        texture = torch.clamp(univ_texture + additional_texture, -epsilon, epsilon)
-    elif univ_texture is not None and additional_texture is None:
-        texture = univ_texture
-    elif univ_texture is None and additional_texture is not None:
-        texture = additional_texture
-    
-    perturbation = torch.clamp(F.grid_sample(texture, uv, mode='bilinear', align_corners=True), -epsilon, epsilon)
-    if bin_mask is not None:
-        perturbation *= bin_mask
-    protected_img = torch.clamp(orig_img + perturbation, 0, 1)
-
-    ## print(texture.max()*255., texture.min()*255., perturbation.max()*255., perturbation.min()*255., protected_img.max()*255., protected_img.min()*255.)
-    orig_img_np = (orig_img.squeeze(0).permute(1, 2, 0)*255.).cpu().numpy().astype(np.uint8)
-    protected_img_np = (protected_img.squeeze(0).permute(1, 2, 0)*255.).cpu().numpy().astype(np.uint8)
-    perturbation_np = (torch.clamp((perturbation - perturbation.min()) / (perturbation.max() - perturbation.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    texture_np = (torch.clamp((texture - texture.min()) / (texture.max() - texture.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    if univ_texture is not None:
-        univ_texture_np = (torch.clamp((univ_texture - univ_texture.min()) / (univ_texture.max() - univ_texture.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8) 
+    _orig_img = orig_img.detach()
+    _uv = uv.detach()
+    _bin_mask = bin_mask.detach()
+    _univ_mask = univ_mask.detach()
+    if three_d:
+        _pert = torch.clamp(F.grid_sample(_univ_mask, _uv.unsqueeze(0), mode='bilinear', align_corners=True).squeeze(0), -epsilon, epsilon)
     else:
-        univ_texture_np = np.zeros((224, 224, 3), dtype=np.uint8)
-    if additional_texture is not None:
-        additional_texture_np = (torch.clamp((additional_texture - additional_texture.min()) / (additional_texture.max() - additional_texture.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8) 
-    else:
-        additional_texture_np = np.zeros((224, 224, 3), dtype=np.uint8)
+        _pert = _univ_mask.squeeze(0)
+    if use_bin_mask:
+        _pert = _pert * _bin_mask
+    _prot_img = torch.clamp(_orig_img + _pert, 0, 1)
 
-    plt.subplot(2, 3, 1)
-    plt.imshow(orig_img_np)
-    plt.title('Original Image')
-    plt.axis('off')
-    plt.subplot(2, 3, 2)
-    plt.imshow(protected_img_np)
-    plt.title('Protected Image')
-    plt.axis('off')
-    plt.subplot(2, 3, 3)
-    plt.imshow(perturbation_np)
-    plt.title('Perturbation')
-    plt.axis('off')
-    plt.subplot(2, 3, 4)
-    plt.imshow(univ_texture_np)
-    plt.title('Universal Texture')
-    plt.axis('off')
-    plt.subplot(2, 3, 5)
-    plt.imshow(additional_texture_np)
-    plt.title('Additional Texture')
-    plt.axis('off')
-    plt.subplot(2, 3, 6)
-    plt.imshow(texture_np)
-    plt.title('Final Texture')
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
+    _orig_img = _orig_img.permute(1, 2, 0).mul(255.).cpu().contiguous().numpy().astype(np.uint8)
+    _prot_img = _prot_img.permute(1, 2, 0).mul(255.).cpu().contiguous().numpy().astype(np.uint8)
+    _pert = (_pert - _pert.min()) / (_pert.max() - _pert.min())
+    if use_bin_mask:
+        _pert = _pert * _bin_mask
+    _pert = _pert.detach().permute(1, 2, 0).mul(255.).cpu().contiguous().numpy().astype(np.uint8)
+    _univ_mask = (_univ_mask - _univ_mask.min()) / (_univ_mask.max() - _univ_mask.min())
+    _univ_mask = _univ_mask.squeeze(0).permute(1, 2, 0).mul(255.).cpu().contiguous().numpy().astype(np.uint8)
 
-def visualize_2dmask(orig_img: torch.Tensor, 
-                    save_path: str, 
-                    epsilon: float,
-                    univ_mask: torch.Tensor = None, 
-                    bin_mask: torch.Tensor = None, 
-                    additional_mask: torch.Tensor = None) -> None: 
-    """
-    Visualize the 3D mask on the original image and save the result.
+    _uv = (_uv - _uv.min()) / (_uv.max() - _uv.min())
+    _uv = _uv.mul(255).cpu().contiguous().numpy().astype(np.uint8)
+    _uv_img = np.zeros((_uv.shape[0], _uv.shape[1], 3), dtype=np.uint8)
+    _uv_img[..., 1:] = _uv
+    _uv = _uv_img
+    # Turn binary mask into a black-white image
+    _bin_mask = _bin_mask.mul(255).permute(1, 2, 0).cpu().contiguous().numpy().astype(np.uint8)
+    _bin_mask = cv2.cvtColor(_bin_mask, cv2.COLOR_GRAY2RGB)
 
-    Args:
-        orig_img (torch.Tensor): The original image. Shape: (1, 3, H, W).
-        save_path (str): The path to save the visualization.
-        epsilon (float): The maximum perturbation value.
-        univ_mask (torch.Tensor): The universal mask to visualize. Shape: (1, 3, H, W)
-        additional_mask (torch.Tensor): Additional mask to visualize. Shape: (1, 3, H, W)
-        bin_mask (torch.Tensor): The binary mask to apply. Shape: (1, 1, H, W). If None, no binary mask is applied.
-    """
-    assert not (univ_mask is None and additional_mask is None), "Either univ_mask or additional_mask must be provided."
-    if univ_mask is not None and additional_mask is not None:
-        perturbation = torch.clamp(univ_mask + additional_mask, -epsilon, epsilon)
-    elif univ_mask is not None and additional_mask is None:
-        perturbation = univ_mask
-    elif univ_mask is None and additional_mask is not None:
-        perturbation = additional_mask
-    if bin_mask is not None:
-        perturbation *= bin_mask
-    protected_img = torch.clamp(orig_img + perturbation, 0, 1)
-
-    ## print(perturbation.max()*255., perturbation.min()*255., protected_img.max()*255., protected_img.min()*255.)
-    orig_img_np = (orig_img.squeeze(0).permute(1, 2, 0)*255.).cpu().numpy().astype(np.uint8)
-    protected_img_np = (protected_img.squeeze(0).permute(1, 2, 0)*255.).cpu().numpy().astype(np.uint8)
-    perturbation_np = (torch.clamp((perturbation - perturbation.min()) / (perturbation.max() - perturbation.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    if univ_mask is not None:
-        univ_mask_np = (torch.clamp((univ_mask - univ_mask.min()) / (univ_mask.max() - univ_mask.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8) 
-    else:
-        univ_mask_np = np.zeros((224, 224, 3), dtype=np.uint8)
-    if additional_mask is not None:
-        additional_mask_np = (torch.clamp((additional_mask - additional_mask.min()) / (additional_mask.max() - additional_mask.min()), 0, 1)*255.).squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    else:
-        additional_mask_np = np.zeros((224, 224, 3), dtype=np.uint8)
-    
-    plt.subplot(2, 3, 1)
-    plt.imshow(orig_img_np)
-    plt.title('Original Image')
-    plt.axis('off')
-    plt.subplot(2, 3, 2)
-    plt.imshow(protected_img_np)
-    plt.title('Protected Image')
-    plt.axis('off')
-    plt.subplot(2, 3, 3)
-    plt.imshow(perturbation_np)
-    plt.title('Perturbation')
-    plt.axis('off')
-    plt.subplot(2, 3, 4)
-    plt.imshow(univ_mask_np)
-    plt.title('Universal Perturbation')
-    plt.axis('off')
-    plt.subplot(2, 3, 5)
-    plt.imshow(additional_mask_np)
-    plt.title('Additional Perturbation')
-    plt.axis('off')
+    plt.figure(figsize=(12, 8))
+    for i, (_img, _title) in enumerate(zip([_orig_img, _prot_img, _univ_mask, _pert, _uv, _bin_mask], 
+                                        ['Original Image', 'Protected Image', 'Universal Mask', 'Perturbation', f'UV({"Used" if three_d else "Unused"})', f'Binary Mask({"Used" if use_bin_mask else "Unused"})'])):
+        plt.subplot(2, 3, i+1)
+        plt.imshow(_img)
+        plt.title(_title)
+        plt.axis('off')
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()

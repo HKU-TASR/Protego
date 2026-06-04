@@ -1,10 +1,11 @@
 import os
-import copy
-from typing import List
+import shutil
+from typing import List, Any, Union, Optional, Dict
 from collections import OrderedDict
 import zipfile
 
 import torch
+import torch.nn.functional as F
 from torchvision import transforms
 import gdown
 
@@ -14,20 +15,27 @@ from FR_DB.adaface import net
 from FR_DB.facenet.inception_resnet_v1 import InceptionResnetV1
 from FR_DB.magface import iresnet
 from FR_DB.magface.iresnet import IResNet
+from FR_DB.vit.vit_face import ViT_face
+from FR_DB.vit.vits_face import ViTs_face
+from . import BASE_PATH
 
-FR_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'FR_DB')
+FR_DB_PATH = os.path.join(BASE_PATH, 'FR_DB')
 IR50_OPOM_HOME = os.path.join(FR_DB_PATH, 'ir50_opom')
 ADAFACE_HOME = os.path.join(FR_DB_PATH, 'adaface')
 ARCFACE_HOME = os.path.join(FR_DB_PATH, 'arcface')
 FACENET_HOME = os.path.join(FR_DB_PATH, 'facenet')
 MAGFACE_HOME = os.path.join(FR_DB_PATH, 'magface')
+VIT_HOME = os.path.join(FR_DB_PATH, 'vit')
 
-SPECIAL_POOL = ['inception_facenet_vgg', 'inception_facenet_casia',
-              'ir50_magface_ms1mv2', 'ir100_magface_ms1mv2']
+# Ten training-surrogate models (Table 2). The default intruder is 'ir50_adaface_casia'.
 BASIC_POOL = ['ir50_softmax_casia', 'ir50_cosface_casia', 
               'ir50_arcface_casia', 'mobilenet_arcface_casia', 'mobilefacenet_arcface_casia', 
               'ir18_adaface_webface', 'ir50_adaface_ms1mv2', 'ir50_adaface_casia', 'ir50_adaface_webface', 'ir101_adaface_webface']
-FINETUNE_POOL = []
+# Six held-out black-box test models with fundamentally different algorithms/architectures.
+SPECIAL_POOL = ['inception_facenet_vgg', 'inception_facenet_casia',
+              'ir50_magface_ms1mv2', 'ir100_magface_ms1mv2',
+              'vit_cosface_ms1mv2', 'vits_cosface_ms1mv2']
+VIT_FAMILY = SPECIAL_POOL[4:6]
 
 def download(path: str, url: str) -> None:
     """
@@ -43,14 +51,22 @@ def download(path: str, url: str) -> None:
         if "uc?id" in url:
             file_id = url.split("uc?id=")[-1]
             downloaded_f = gdown.download(id=file_id, output=folder, quiet=False)
-        elif "view?usp=sharing" in url:
-            downloaded_f = gdown.download(url=url, output=folder, fuzzy=True, quiet=False)
-        if downloaded_f.endswith(".zip"):
-            with zipfile.ZipFile(downloaded_f, 'r') as zip_ref:
-                zip_ref.extractall(folder)
-            os.remove(downloaded_f)
-        elif downloaded_f != path:
-            os.rename(downloaded_f, path)
+        elif "usp=sharing" in url or "usp=share_link" in url:
+            if "file" in url:
+                downloaded_f = gdown.download(url=url, output=folder, fuzzy=True, quiet=False)
+                if downloaded_f.endswith(".zip"):
+                    with zipfile.ZipFile(downloaded_f, 'r') as zip_ref:
+                        zip_ref.extractall(folder)
+                    os.remove(downloaded_f)
+                elif downloaded_f != path:
+                    os.rename(downloaded_f, path)
+            elif "folder" in url:
+                download_fs = gdown.download_folder(url=url, output=folder, quiet=False)
+                for f in download_fs:
+                    shutil.move(f, os.path.join(folder, f.split("/")[-1]))
+                os.removedirs(os.path.join(folder, download_fs[0].split("/")[-2]))
+            else:
+                raise ValueError(f"Unrecognized URL format: {url}")
     return
     
 class FR(object):
@@ -145,6 +161,10 @@ class FR(object):
             self.fr_model = Magface(arch='iresnet50', device=self.device)
         elif self.model_name == 'ir100_magface_ms1mv2': # Improved ResNet100 + MagFace + MS1MV2
             self.fr_model = Magface(arch='iresnet100', device=self.device)
+        elif self.model_name == 'vit_cosface_ms1mv2': # ViT + CosFace + MS1MV2
+            self.fr_model = ViT(backbone='vit', device=self.device)
+        elif self.model_name == 'vits_cosface_ms1mv2': # ViTs + CosFace + MS1MV2
+            self.fr_model = ViT(backbone='vits', device=self.device)
         else:
             raise ValueError(f"Invalid model name: {self.model_name}")
         
@@ -204,9 +224,9 @@ class FR(object):
         if images.max() >= 2 and self.drange == 1:
             rescaled_images = images.float() / 255.
         elif images.max() >= 2 and self.drange == 255:
-            rescaled_images = images
+            rescaled_images = images.float()
         elif images.max() < 2 and self.drange == 1:
-            rescaled_images = images
+            rescaled_images = images.float()
         elif images.max() < 2 and self.drange == 255:
             rescaled_images = images.float() * 255.
         preprocessed = torch.stack([self.preprocess_method(img) for img in rescaled_images])
@@ -432,7 +452,7 @@ class AdaFace(object):
             'ir_50_casia': os.path.join(ADAFACE_HOME, 'pretrained/adaface_ir50_casia.ckpt'),
             'ir_50_web': os.path.join(ADAFACE_HOME, 'pretrained/adaface_ir50_webface4m.ckpt'),
             'ir_101_web': os.path.join(ADAFACE_HOME, 'pretrained/adaface_ir101_webface4m.ckpt'),
-            'ir_50_ms1mv2': os.path.join(ADAFACE_HOME, 'pretrained/adaface_ir50_ms1mv2.ckpt')
+            'ir_50_ms1mv2': os.path.join(ADAFACE_HOME, 'pretrained/adaface_ir50_ms1mv2.ckpt'),
         }
         self.url_dict = {
             'ir_18_web': "https://drive.google.com/file/d/1J17_QW1Oq00EhSWObISnhWEYr2NNrg2y/view?usp=sharing",
@@ -441,7 +461,8 @@ class AdaFace(object):
             'ir_101_web': "https://drive.google.com/file/d/18jQkqB0avFqWa0Pas52g54xNshUOQJpQ/view?usp=sharing",
             'ir_50_ms1mv2': "https://drive.google.com/file/d/1eUaSHG4pGlIZK7hBkqjyp2fc2epKoBvI/view?usp=sharing"
         }
-        download(self.path_dict[backbone], self.url_dict[backbone])
+        if backbone in self.url_dict.keys():
+            download(self.path_dict[backbone], self.url_dict[backbone])
         model_path = self.path_dict[backbone]
         self.model = net.build_model("_".join(backbone.split('_')[:2]))
         statedict = torch.load(model_path, weights_only=False, map_location=device)['state_dict']
@@ -463,3 +484,69 @@ class AdaFace(object):
 
     def forward(self, imgs: torch.Tensor) -> torch.Tensor:
         return self.model(imgs)[0]
+
+class ViT(object):
+    """
+    Model: ViT/ViTs (Pure and simplest ViT. ViT does hard patching while ViTs does overlapping/soft patching)
+    Datasets: MS1MV2
+    Loss Function: CosFace
+    Source: https://github.com/zhongyy/Face-Transformer (arXiv)
+
+    Args:
+        backbone (str): Backbone model name. Options are 'vit', 'vits'.
+        device (torch.device): The device to run the model on.
+    """
+    def __init__(self, backbone: str, device: torch.device):
+        self.path_dict = {
+            'vit': os.path.join(VIT_HOME, 'pretrained/Backbone_VIT_Epoch_2_Batch_20000_Time_2021-01-12-16-48_checkpoint.pth'),
+            'vits': os.path.join(VIT_HOME, 'pretrained/Backbone_VITs_Epoch_2_Batch_12000_Time_2021-03-17-04-05_checkpoint.pth')
+        }
+        self.url_dict = {
+            'vit': "https://drive.google.com/file/d/1OZRU430CjABSJtXU0oHZHlxgzXn6Gaqu/view?usp=share_link", 
+            'vits': "https://drive.google.com/file/d/1U7c_ojiuRPBfolvziB_VthksABHaFKud/view?usp=share_link"
+        }
+        download(self.path_dict[backbone], self.url_dict[backbone])
+        model_path = self.path_dict[backbone]
+        if backbone == 'vit':
+            self.model = ViT_face(
+                image_size=112, 
+                patch_size=8, 
+                loss_type='CosFace', 
+                GPU_ID=device, 
+                num_class=93431, 
+                dim=512, 
+                depth=20, 
+                heads=8, 
+                mlp_dim=2048,
+                dropout=0.1,
+                emb_dropout=0.1)
+        elif backbone == 'vits':
+            self.model = ViTs_face(
+                loss_type='CosFace',
+                GPU_ID=device,
+                num_class=93431,
+                image_size=112,
+                patch_size=8,
+                ac_patch_size=12,
+                pad=4,
+                dim=512,
+                depth=20,
+                heads=8,
+                mlp_dim=2048,
+                dropout=0.1,
+                emb_dropout=0.1)
+        self.model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+        self.model = self.model.to(device).eval()
+
+        self.preprocessing = transforms.Compose([
+            transforms.Resize((112, 112))
+        ])
+        self.img_size = 112
+        self.drange = 255
+        self.dis_func = "cosine"
+        self.embedding_dim = 512
+        self.l2norm = True
+
+    def forward(self, imgs: torch.Tensor) -> torch.Tensor:
+        flipped_imgs = torch.flip(imgs, dims=[3])
+        return F.normalize(self.model(imgs) + self.model(flipped_imgs))
