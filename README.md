@@ -1,4 +1,4 @@
-# Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure
+# [CVPR2026 & [CVPR Compute Gold Star](https://cvpr.thecvf.com/Conferences/2026/ComputeReporting)]Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure
 
 ## Introduction
 
