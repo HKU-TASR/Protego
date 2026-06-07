@@ -27,7 +27,7 @@ The original video and its protected versions using three different methods (Pro
 
 ![BC OPOM Gif](assets/Bradley_Cooper_OPOM.gif)
 
-For more technical details and experimental results, we invite you to check out [our paper]([https://arxiv.org/abs/2508.02034](https://openaccess.thecvf.com/content/CVPR2026/papers/Wang_Protego_User-Centric_Pose-Invariant_Privacy_Protection_Against_Face_Recognition-Induced_Digital_Footprint_CVPR_2026_paper.pdf)):
+For more technical details and experimental results, we invite you to check out [our paper](https://openaccess.thecvf.com/content/CVPR2026/papers/Wang_Protego_User-Centric_Pose-Invariant_Privacy_Protection_Against_Face_Recognition-Induced_Digital_Footprint_CVPR_2026_paper.pdf):
 
 **Ziling Wang, Shuya Yang, Jialin Lu, and Ka-Ho Chow,** *"Protego: User-Centric Pose-Invariant Privacy Protection Against Face Recognition-Induced Digital Footprint Exposure,"*  IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), Denver, CO, USA, Jun. 3-7, 2026.
 
