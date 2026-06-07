@@ -16,10 +16,15 @@ The original video and its protected versions using three different methods (Pro
 ![Banner](assets/banner.png)
 
 * ***Protego (Ours, CVPR'26)***
+
 ![BC Protego Gif](assets/Bradley_Cooper_Protego.gif)
+
 * Chameleon (ECCV'24)
+
 ![BC Chameleon Gif](assets/Bradley_Cooper_Chameleon.gif)
+
 * OPOM (TPAMI'22)
+
 ![BC OPOM Gif](assets/Bradley_Cooper_OPOM.gif)
 
 For more technical details and experimental results, we invite you to check out [our paper]([https://arxiv.org/abs/2508.02034](https://openaccess.thecvf.com/content/CVPR2026/papers/Wang_Protego_User-Centric_Pose-Invariant_Privacy_Protection_Against_Face_Recognition-Induced_Digital_Footprint_CVPR_2026_paper.pdf)):
