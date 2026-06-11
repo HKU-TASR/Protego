@@ -54,7 +54,7 @@ The current version of Protego is not optimized for performance, so there may be
 * Ubuntu 22.04; Intel(R) Xeon(R) Silver 4108 CPU; 1 NVIDIA RTX 3090 GPU (24 GB); 128 GB RAM
 * Ubuntu 22.04; Intel(R) Xeon(R) Silver 4108 CPU; 1 NVIDIA RTX 4080 GPU (16 GB); 128 GB RAM
 * macOS 15.6.1; Apple M4 Pro; 24 GB Memory
-* macOS 15.6.1; Apple M4; 16 GB Memory
+* macOS 15.6.1; Apple M3; 16 GB Memory
 
 Linux + CUDA is the primary, recommended setup. macOS (MPS) is supported but slower and less stable, mostly because of PyTorch and PyTorch3D's immature MPS support — prefer CPU-only or CUDA for stability/performance. Windows users may need to figure out the setup (especially PyTorch3D) themselves; best-effort support only.
 
