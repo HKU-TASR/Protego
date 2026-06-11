@@ -49,7 +49,7 @@ This repository contains the full source code for Protego: training a Privacy Pr
 The current version of Protego is not optimized for performance, so there may be OOM issues on low-memory devices. For reference, you need around **8 GB of (GPU) memory**. The code has been tested on the following platforms:
 
 * Ubuntu 22.04; Intel Xeon w5-3415 CPU; 1 NVIDIA RTX 5880 Ada GPU (48 GB); 128 GB RAM
-* Ubuntu 22.04; AMD EPYC 9354 CPU; 1 NVIDIA RTX 5880 GPU (48 GB); 256 GB RAM
+* Ubuntu 22.04; AMD EPYC 9354 CPU; 1 NVIDIA RTX 5880 Ada GPU (48 GB); 256 GB RAM
 * Ubuntu 22.04; AMD EPYC 9354 CPU; 1 NVIDIA RTX 4090 GPU (24 GB); 256 GB RAM
 * Ubuntu 22.04; Intel(R) Xeon(R) Silver 4108 CPU; 1 NVIDIA RTX 3090 GPU (24 GB); 128 GB RAM
 * Ubuntu 22.04; Intel(R) Xeon(R) Silver 4108 CPU; 1 NVIDIA RTX 4080 GPU (16 GB); 128 GB RAM
